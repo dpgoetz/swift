@@ -27,6 +27,7 @@ from eventlet import greenio, GreenPool, sleep, wsgi, listen
 from paste.deploy import loadapp, appconfig
 from eventlet.green import socket, ssl
 from webob import Request
+from urllib import unquote
 
 from swift.common.utils import get_logger, drop_privileges, \
     validate_configuration, capture_stdio, NullLogger
