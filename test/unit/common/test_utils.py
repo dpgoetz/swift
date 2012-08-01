@@ -96,10 +96,12 @@ class MockSys():
 def reset_loggers():
     if hasattr(utils.get_logger, 'handler4logger'):
         for logger, handler in utils.get_logger.handler4logger.items():
+            logger.thread_locals = (None, None)
             logger.removeHandler(handler)
         delattr(utils.get_logger, 'handler4logger')
     if hasattr(utils.get_logger, 'console_handler4logger'):
         for logger, h in utils.get_logger.console_handler4logger.items():
+            logger.thread_locals = (None, None)
             logger.removeHandler(h)
         delattr(utils.get_logger, 'console_handler4logger')
 
@@ -191,6 +193,27 @@ class TestUtils(unittest.TestCase):
             utils.split_path('o\nn e', 2, 3, True)
         except ValueError, err:
             self.assertEquals(str(err), 'Invalid path: o%0An%20e')
+
+    def test_validate_device_partition(self):
+        """ Test swift.common.utils.validate_device_partition """
+        utils.validate_device_partition('foo', 'bar')
+        self.assertRaises(ValueError, utils.validate_device_partition, '', '')
+        self.assertRaises(ValueError, utils.validate_device_partition, '', 'foo')
+        self.assertRaises(ValueError, utils.validate_device_partition, 'foo', '')
+        self.assertRaises(ValueError, utils.validate_device_partition, 'foo/bar', 'foo')
+        self.assertRaises(ValueError, utils.validate_device_partition, 'foo', 'foo/bar')
+        self.assertRaises(ValueError, utils.validate_device_partition, '.', 'foo')
+        self.assertRaises(ValueError, utils.validate_device_partition, '..', 'foo')
+        self.assertRaises(ValueError, utils.validate_device_partition, 'foo', '.')
+        self.assertRaises(ValueError, utils.validate_device_partition, 'foo', '..')
+        try:
+            utils.validate_device_partition,('o\nn e', 'foo')
+        except ValueError, err:
+            self.assertEquals(str(err), 'Invalid device: o%0An%20e')
+        try:
+            utils.validate_device_partition,('foo', 'o\nn e')
+        except ValueError, err:
+            self.assertEquals(str(err), 'Invalid partition: o%0An%20e')
 
     def test_NullLogger(self):
         """ Test swift.common.utils.NullLogger """
@@ -1128,6 +1151,31 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
                         self.logger.update_stats, 'another.counter', 3,
                         sample_rate=0.9912)
 
+    def test_get_valid_utf8_str(self):
+        unicode_sample = u'\uc77c\uc601'
+        valid_utf8_str = unicode_sample.encode('utf-8')
+        invalid_utf8_str = unicode_sample.encode('utf-8')[::-1]
+        self.assertEquals(valid_utf8_str,
+                          utils.get_valid_utf8_str(valid_utf8_str))
+        self.assertEquals(valid_utf8_str,
+                          utils.get_valid_utf8_str(unicode_sample))
+        self.assertEquals('\xef\xbf\xbd\xef\xbf\xbd\xec\xbc\x9d\xef\xbf\xbd',
+                          utils.get_valid_utf8_str(invalid_utf8_str))
+
+    def test_thread_locals(self):
+        logger = utils.get_logger(None)
+        orig_thread_locals = logger.thread_locals
+        try:
+            self.assertEquals(logger.thread_locals, (None, None))
+            logger.txn_id = '1234'
+            logger.client_ip = '1.2.3.4'
+            self.assertEquals(logger.thread_locals, ('1234', '1.2.3.4'))
+            logger.txn_id = '5678'
+            logger.client_ip = '5.6.7.8'
+            self.assertEquals(logger.thread_locals, ('5678', '5.6.7.8'))
+        finally:
+            logger.thread_locals = orig_thread_locals
+        
 
 if __name__ == '__main__':
     unittest.main()

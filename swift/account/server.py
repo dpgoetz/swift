@@ -32,9 +32,10 @@ import simplejson
 import swift.common.db
 from swift.common.db import AccountBroker
 from swift.common.utils import get_logger, get_param, hash_path, public, \
-    normalize_timestamp, split_path, storage_directory, TRUE_VALUES
+    normalize_timestamp, split_path, storage_directory, TRUE_VALUES, \
+    validate_device_partition
 from swift.common.constraints import ACCOUNT_LISTING_LIMIT, \
-    check_mount, check_float, check_utf8
+    check_mount, check_float, check_utf8, FORMAT2CONTENT_TYPE
 from swift.common.db_replicator import ReplicatorRpc
 from swift.common.http import HTTPInsufficientStorage
 
@@ -69,6 +70,7 @@ class AccountController(object):
         start_time = time.time()
         try:
             drive, part, account = split_path(unquote(req.path), 3)
+            validate_device_partition(drive, part)
         except ValueError, err:
             self.logger.increment('DELETE.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
@@ -96,6 +98,7 @@ class AccountController(object):
         try:
             drive, part, account, container = split_path(unquote(req.path),
                                                          3, 4)
+            validate_device_partition(drive, part)
         except ValueError, err:
             self.logger.increment('PUT.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
@@ -164,6 +167,7 @@ class AccountController(object):
         try:
             drive, part, account, container = split_path(unquote(req.path),
                                                          3, 4)
+            validate_device_partition(drive, part)
         except ValueError, err:
             self.logger.increment('HEAD.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
@@ -201,6 +205,7 @@ class AccountController(object):
         start_time = time.time()
         try:
             drive, part, account = split_path(unquote(req.path), 3)
+            validate_device_partition(drive, part)
         except ValueError, err:
             self.logger.increment('GET.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
@@ -247,7 +252,8 @@ class AccountController(object):
             return HTTPBadRequest(body='parameters not utf8',
                                   content_type='text/plain', request=req)
         if query_format:
-            req.accept = 'application/%s' % query_format.lower()
+            req.accept = FORMAT2CONTENT_TYPE.get(query_format.lower(),
+                                                 FORMAT2CONTENT_TYPE['plain'])
         try:
             out_content_type = req.accept.best_match(
                                     ['text/plain', 'application/json',
@@ -305,11 +311,12 @@ class AccountController(object):
         start_time = time.time()
         try:
             post_args = split_path(unquote(req.path), 3)
+            drive, partition, hash = post_args
+            validate_device_partition(drive, partition)
         except ValueError, err:
             self.logger.increment('REPLICATE.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                                     request=req)
-        drive, partition, hash = post_args
         if self.mount_check and not check_mount(self.root, drive):
             self.logger.increment('REPLICATE.errors')
             return HTTPInsufficientStorage(drive=drive, request=req)
@@ -329,6 +336,7 @@ class AccountController(object):
         start_time = time.time()
         try:
             drive, part, account = split_path(unquote(req.path), 3)
+            validate_device_partition(drive, part)
         except ValueError, err:
             self.logger.increment('POST.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',

@@ -45,6 +45,9 @@ import eventlet
 from eventlet import GreenPool, sleep, Timeout
 from eventlet.green import socket, threading
 import netifaces
+import codecs
+utf8_decoder = codecs.getdecoder('utf-8')
+utf8_encoder = codecs.getencoder('utf-8')
 
 from swift.common.exceptions import LockTimeout, MessageTimeout
 
@@ -89,7 +92,7 @@ def validate_configuration():
                  "from /etc/swift/swift.conf")
 
 
-def load_libc_function(func_name):
+def load_libc_function(func_name, log_error=True):
     """
     Attempt to find the function in libc, otherwise return a no-op func.
 
@@ -99,8 +102,9 @@ def load_libc_function(func_name):
         libc = ctypes.CDLL(ctypes.util.find_library('c'))
         return getattr(libc, func_name)
     except AttributeError:
-        logging.warn(_("Unable to locate %s in libc.  Leaving as a no-op."),
-                     func_name)
+        if log_error:
+            logging.warn(_("Unable to locate %s in libc.  Leaving as a "
+                         "no-op."), func_name)
         return noop_libc_function
 
 
@@ -114,8 +118,8 @@ def get_param(req, name, default=None):
     :param default: result to return if the parameter is not found
     :returns: HTTP request parameter value
     """
-    value = req.str_params.get(name, default)
-    if value:
+    value = req.params.get(name, default)
+    if value and not isinstance(value, unicode):
         value.decode('utf8')    # Ensure UTF8ness
     return value
 
@@ -125,9 +129,12 @@ class FallocateWrapper(object):
     def __init__(self):
         for func in ('fallocate', 'posix_fallocate'):
             self.func_name = func
-            self.fallocate = load_libc_function(func)
+            self.fallocate = load_libc_function(func, log_error=False)
             if self.fallocate is not noop_libc_function:
                 break
+        if self.fallocate is noop_libc_function:
+            logging.warn(_("Unable to locate fallocate, posix_fallocate in "
+                         "libc.  Leaving as a no-op."))
 
     def __call__(self, fd, mode, offset, len):
         args = {
@@ -263,6 +270,28 @@ def split_path(path, minsegs=1, maxsegs=None, rest_with_last=False):
     return segs
 
 
+def validate_device_partition(device, partition):
+    """
+    Validate that a device and a partition are valid and won't lead to
+    directory traversal when used.
+
+    :param device: device to validate
+    :param partition: partition to validate
+    :raises: ValueError if given an invalid device or partition
+    """
+    invalid_device = False
+    invalid_partition = False
+    if not device or '/' in device or device in ['.', '..']:
+        invalid_device = True
+    if not partition or '/' in partition or partition in ['.', '..']:
+        invalid_partition = True
+
+    if invalid_device:
+        raise ValueError('Invalid device: %s' % quote(device or ''))
+    elif invalid_partition:
+        raise ValueError('Invalid partition: %s' % quote(partition or ''))
+
+
 class NullLogger():
     """A no-op logger for eventlet wsgi."""
 
@@ -393,6 +422,14 @@ class LogAdapter(logging.LoggerAdapter, object):
     def client_ip(self, value):
         self._cls_thread_local.client_ip = value
 
+    @property
+    def thread_locals(self):
+        return (self.txn_id, self.client_ip)
+
+    @thread_locals.setter
+    def thread_locals(self, value):
+        self.txn_id, self.client_ip = value
+
     def getEffectiveLevel(self):
         return self.logger.getEffectiveLevel()
 
@@ -511,6 +548,8 @@ def get_logger(conf, name=None, log_to_console=False, log_route=None,
         log_facility = LOG_LOCAL0
         log_level = INFO
         log_name = swift
+        log_udp_host = (disabled)
+        log_udp_port = logging.handlers.SYSLOG_UDP_PORT
         log_statsd_host = (disabled)
         log_statsd_port = 8125
         log_statsd_default_sample_rate = 1
@@ -542,13 +581,19 @@ def get_logger(conf, name=None, log_to_console=False, log_route=None,
     # facility for this logger will be set by last call wins
     facility = getattr(SysLogHandler, conf.get('log_facility', 'LOG_LOCAL0'),
                        SysLogHandler.LOG_LOCAL0)
-    log_address = conf.get('log_address', '/dev/log')
-    try:
-        handler = SysLogHandler(address=log_address, facility=facility)
-    except socket.error, e:
-        if e.errno != errno.ENOTSOCK:  # Socket operation on non-socket
-            raise e
-        handler = SysLogHandler(facility=facility)
+    udp_host = conf.get('log_udp_host')
+    if udp_host:
+        udp_port = conf.get('log_udp_port', logging.handlers.SYSLOG_UDP_PORT)
+        handler = SysLogHandler(address=(udp_host, udp_port),
+                                facility=facility)
+    else:
+        log_address = conf.get('log_address', '/dev/log')
+        try:
+            handler = SysLogHandler(address=log_address, facility=facility)
+        except socket.error, e:
+            if e.errno != errno.ENOTSOCK:  # Socket operation on non-socket
+                raise e
+            handler = SysLogHandler(facility=facility)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     get_logger.handler4logger[logger] = handler
@@ -1310,3 +1355,15 @@ def rsync_ip(ip):
         return ip
     else:
         return '[%s]' % ip
+
+
+def get_valid_utf8_str(str_or_unicode):
+    """
+    Get valid parts of utf-8 str from str, unicode and even invalid utf-8 str
+
+    :param str_or_unicode: a string or an unicode which can be invalid utf-8
+    """
+    if isinstance(str_or_unicode, unicode):
+        (str_or_unicode, _len) = utf8_encoder(str_or_unicode, 'replace')
+    (valid_utf8_str, _len) = utf8_decoder(str_or_unicode, 'replace')
+    return valid_utf8_str.encode('utf-8')

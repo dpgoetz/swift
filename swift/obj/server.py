@@ -38,7 +38,7 @@ from eventlet import sleep, Timeout, tpool
 from swift.common.utils import mkdirs, normalize_timestamp, public, \
     storage_directory, hash_path, renamer, fallocate, \
     split_path, drop_buffer_cache, get_logger, write_pickle, \
-    TRUE_VALUES
+    TRUE_VALUES, validate_device_partition
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, check_mount, \
     check_float, check_utf8
@@ -275,7 +275,7 @@ class DiskFile(object):
         :params fd: file descriptor of the temp file
         :param tmppath: path to the temporary file being used
         :param metadata: dictionary of metadata to be written
-        :param extention: extension to be used when making the file
+        :param extension: extension to be used when making the file
         """
         metadata['name'] = self.name
         timestamp = normalize_timestamp(metadata['X-Timestamp'])
@@ -494,6 +494,7 @@ class ObjectController(object):
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
+            validate_device_partition(device, partition)
         except ValueError, err:
             self.logger.increment('POST.errors')
             return HTTPBadRequest(body=str(err), request=request,
@@ -554,6 +555,7 @@ class ObjectController(object):
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
+            validate_device_partition(device, partition)
         except ValueError, err:
             self.logger.increment('PUT.errors')
             return HTTPBadRequest(body=str(err), request=request,
@@ -653,6 +655,7 @@ class ObjectController(object):
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
+            validate_device_partition(device, partition)
         except ValueError, err:
             self.logger.increment('GET.errors')
             return HTTPBadRequest(body=str(err), request=request,
@@ -743,6 +746,7 @@ class ObjectController(object):
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
+            validate_device_partition(device, partition)
         except ValueError, err:
             self.logger.increment('HEAD.errors')
             resp = HTTPBadRequest(request=request)
@@ -789,6 +793,7 @@ class ObjectController(object):
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
+            validate_device_partition(device, partition)
         except ValueError, e:
             self.logger.increment('DELETE.errors')
             return HTTPBadRequest(body=str(e), request=request,
@@ -843,6 +848,7 @@ class ObjectController(object):
         try:
             device, partition, suffix = split_path(
                 unquote(request.path), 2, 3, True)
+            validate_device_partition(device, partition)
         except ValueError, e:
             self.logger.increment('REPLICATE.errors')
             return HTTPBadRequest(body=str(e), request=request,
@@ -868,6 +874,7 @@ class ObjectController(object):
         start_time = time.time()
         req = Request(env)
         self.logger.txn_id = req.headers.get('x-trans-id', None)
+
         if not check_utf8(req.path_info):
             res = HTTPPreconditionFailed(body='Invalid UTF8')
         else:

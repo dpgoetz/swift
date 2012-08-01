@@ -644,6 +644,14 @@ class TestContainerController(unittest.TestCase):
         self.assertEquals(resp.content_type, 'text/plain')
         self.assertEquals(resp.body, plain_body)
 
+        # test unknown format uses default plain
+        req = Request.blank('/sda1/p/a/plainc?format=somethingelse',
+                environ={'REQUEST_METHOD': 'GET'})
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 200)
+        self.assertEquals(resp.content_type, 'text/plain')
+        self.assertEquals(resp.body, plain_body)
+
     def test_GET_json_last_modified(self):
         # make a container
         req = Request.blank('/sda1/p/a/jsonc', environ={'REQUEST_METHOD': 'PUT',
@@ -952,12 +960,21 @@ class TestContainerController(unittest.TestCase):
         self.assertEquals(errbuf.getvalue(), '')
         self.assertEquals(outbuf.getvalue()[:4], '405 ')
 
+    def test_params_format(self):
+        self.controller.PUT(Request.blank('/sda1/p/a/c',
+                            headers={'X-Timestamp': normalize_timestamp(1)},
+                            environ={'REQUEST_METHOD': 'PUT'}))
+        for format in ('xml', 'json'):
+            req = Request.blank('/sda1/p/a/c?format=%s' % format,
+                                environ={'REQUEST_METHOD': 'GET'})
+            resp = self.controller.GET(req)
+            self.assertEquals(resp.status_int, 200)
+
     def test_params_utf8(self):
         self.controller.PUT(Request.blank('/sda1/p/a/c',
                             headers={'X-Timestamp': normalize_timestamp(1)},
                             environ={'REQUEST_METHOD': 'PUT'}))
-        for param in ('delimiter', 'format', 'limit', 'marker', 'path',
-                      'prefix'):
+        for param in ('delimiter', 'limit', 'marker', 'path', 'prefix'):
             req = Request.blank('/sda1/p/a/c?%s=\xce' % param,
                                 environ={'REQUEST_METHOD': 'GET'})
             resp = self.controller.GET(req)
