@@ -556,7 +556,7 @@ class ObjectReplicator(Daemon):
         self.job_count = len(jobs)
         return jobs
 
-    def replicate(self):
+    def replicate(self, override_devices=[]):
         """Run a replication pass"""
         self.start = time.time()
         self.suffix_count = 0
@@ -572,6 +572,8 @@ class ObjectReplicator(Daemon):
             self.run_pool = GreenPool(size=self.concurrency)
             jobs = self.collect_jobs()
             for job in jobs:
+                if override_devices and job['device'] not in override_devices:
+                    continue
                 dev_path = join(self.devices_dir, job['device'])
                 if self.mount_check and not os.path.ismount(dev_path):
                     self.logger.warn(_('%s is not mounted'), job['device'])
@@ -597,7 +599,11 @@ class ObjectReplicator(Daemon):
     def run_once(self, *args, **kwargs):
         start = time.time()
         self.logger.info(_("Running object replicator in script mode."))
-        self.replicate()
+        override_devices = []
+        if 'devices' in kwargs:
+            override_devices = [d.strip() for d in kwargs['devices'].split(',')
+                                if d.strip()]
+        self.replicate(override_devices=override_devices)
         total = (time.time() - start) / 60
         self.logger.info(
             _("Object replication complete. (%.02f minutes)"), total)
