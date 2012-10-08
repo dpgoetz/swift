@@ -17,6 +17,7 @@
 
 import unittest
 import datetime
+from StringIO import StringIO
 
 import swift.common.swob
 
@@ -189,6 +190,16 @@ class TestRequest(unittest.TestCase):
     def test_blank(self):
         req = swift.common.swob.Request.blank(
             '/', environ={'REQUEST_METHOD': 'POST'},
+            headers={'Content-Type': 'text/plain'}, body='hi')
+        self.assertEquals(req.path_info, '/')
+        self.assertEquals(req.body, 'hi')
+        self.assertEquals(req.headers['Content-Type'], 'text/plain')
+        self.assertEquals(req.method, 'POST')
+
+    def test_blank_body_precedence(self):
+        req = swift.common.swob.Request.blank(
+            '/', environ={'REQUEST_METHOD': 'POST',
+                          'wsgi.input': StringIO('')},
             headers={'Content-Type': 'text/plain'}, body='hi')
         self.assertEquals(req.path_info, '/')
         self.assertEquals(req.body, 'hi')

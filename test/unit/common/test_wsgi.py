@@ -217,6 +217,10 @@ class TestWSGI(unittest.TestCase):
             {'QUERY_STRING': 'original'}, 'GET', 'path?')
         self.assertEquals(r.query_string, '')
 
+    def test_pre_auth_req_with_body(self):
+        r = wsgi.make_pre_authed_request(
+            {'QUERY_STRING': 'original'}, 'GET', 'path', 'the body')
+        self.assertEquals(r.body, 'the body')
 
 if __name__ == '__main__':
     unittest.main()
