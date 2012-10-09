@@ -647,7 +647,7 @@ class Request(object):
         if body is not None:
             env['wsgi.input'] = StringIO(body)
             env['CONTENT_LENGTH'] = str(len(body))
-        elif 'wsgi.input' not in environ:
+        elif 'wsgi.input' not in env:
             env['wsgi.input'] = StringIO('')
         req = Request(env)
         for key, val in headers.iteritems():
