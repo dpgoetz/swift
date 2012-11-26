@@ -1012,6 +1012,7 @@ class StatusMap(object):
 status_map = StatusMap()
 
 
+HTTPOk = status_map[200]
 HTTPAccepted = status_map[202]
 HTTPCreated = status_map[201]
 HTTPNoContent = status_map[204]
@@ -1032,5 +1033,6 @@ HTTPUnprocessableEntity = status_map[422]
 HTTPClientDisconnect = status_map[499]
 HTTPServerError = status_map[500]
 HTTPInternalServerError = status_map[500]
+HTTPBadGateway = status_map[502]
 HTTPServiceUnavailable = status_map[503]
 HTTPInsufficientStorage = status_map[507]
