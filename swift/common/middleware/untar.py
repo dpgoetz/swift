@@ -23,15 +23,16 @@ class Untar(object):
     """
     Middleware that will expand tar files into a swift account.
     Request must be a PUT with the header X-Extract-Archive specifying the
-    format of archive file. Accepted formats are .tar, .tar.gz, and .tar.bz2.
+    format of archive file. Accepted formats are tar, tar.gz, and tar.bz2.
 
     For a PUT to the following url:
     /v1/AUTH_Account/$UPLOAD_PATH
-    UPLOAD_PATH is where the files will be expanded to. UPLOAD_PATH can be an
-    existing container, a pseudo-directory within a container, or an empty
-    string. The destination of a file in the archive will be built as follows:
+    UPLOAD_PATH is where the files will be expanded to. UPLOAD_PATH can be a
+    container, a pseudo-directory within a container, or an empty string. The
+    destination of a file in the archive will be built as follows:
     /v1/AUTH_Account/$UPLOAD_PATH/$FILE_PATH
     Where FILE_PATH is the file name from the listing in the tar file.
+
     If the UPLOAD_PATH is empty string, containers will be auto created
     accordingly and files in the tar that would not map to any container (files
     in the base directory) will be ignored.
@@ -40,9 +41,10 @@ class Untar(object):
     not be uploaded.
 
     If all valid files were uploaded successfully will return an HTTPCreated
-    response with the # files created in the response message.
-    If any files failed to be created will return an HTTPBadGateway response
-    with a list of the files (in json) that failed.
+    response. If any files failed to be created will return an HTTPBadGateway
+    response. In both cases the response body is a json dictionary specifying
+    in the number of files successfully uploaded and a list of the files that
+    failed.
     """
 
     def __init__(self, app, conf):
@@ -69,12 +71,16 @@ class Untar(object):
         create_cont_req = Request.blank(container_path, environ=new_env)
         resp = create_cont_req.get_response(self.app)
         if resp.status_int // 100 != 2:
-            err = CreateContainerError(
+            raise CreateContainerError(
                 "Create Container Failed: " + container_path, resp.status)
         return container
 
-    def handle_extract(self, req, start_response, compress_type):
-        #TODO test explode_to with unicode, spaces, etc
+    def handle_extract(self, req, compress_type):
+        """
+        :params req: a swob Request
+        :params compress_type: specifying the compression type of the tar.
+                               Accepts '', 'gz, or 'bz2'
+        """
         success_count = 0
         failed_files = []
         existing_containers = set()
@@ -88,12 +94,14 @@ class Untar(object):
         try:
             tar = tarfile.open(mode='r|' + compress_type,
                                fileobj=req.body_file)
-            tar_info = tar.next()
-            while tar_info:
-                if len(failed_files) >= self.max_failed_files:
+            while True:
+                tar_info = tar.next()
+                if tar_info is None or \
+                        len(failed_files) >= self.max_failed_files:
                     break
                 if tar_info.isfile():
                     obj_path = tar_info.name
+                    print "ffff: %s" % obj_path
                     if obj_path.startswith('./'):
                         obj_path = obj_path[2:]
                     obj_path = obj_path.lstrip('/')
@@ -103,13 +111,13 @@ class Untar(object):
                     destination = '/'.join(
                         ['', vrs, account, obj_path])
                     container = obj_path.split('/', 1)[0]
-
                     if container not in existing_containers:
                         try:
                             existing_containers.add(
                                 self.create_container_for_path(req,
                                                                destination))
                         except CreateContainerError, err:
+                            print "vvvvvvvvvvvvvvvvvvvv"
                             failed_files.append(
                                 (destination[:MAX_PATH_LENGTH], err.status))
                             continue
@@ -140,8 +148,6 @@ class Untar(object):
                         failed_files.append(
                             (destination[:MAX_PATH_LENGTH], resp.status))
 
-                tar_info = tar.next()
-
             resp_body = simplejson.dumps(
                 {'Number Created Files': success_count,
                  'Failures': failed_files})
@@ -150,6 +156,7 @@ class Untar(object):
             if failed_files:
                 return HTTPBadGateway(resp_body)
 
+            print "tttttttttttttttttttttttttttttttttttttttttttt"
             return HTTPBadRequest('Invalid Tar File: No Valid Files')
 
         except tarfile.TarError, tar_error:
@@ -167,7 +174,7 @@ class Untar(object):
                 archive_type = typ
                 break
         if req.method == 'PUT' and archive_type is not None:
-            resp = self.handle_extract(req, start_response, archive_type)
+            resp = self.handle_extract(req, archive_type)
             return resp(env, start_response)
         return self.app(env, start_response)
 
