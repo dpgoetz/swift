@@ -3,11 +3,10 @@ from urllib import quote, unquote
 import simplejson
 from swift.common.swob import Request, HTTPBadGateway, HTTPServerError, \
     HTTPCreated, HTTPBadRequest, HTTPNotFound
-from swift.common.utils import TRUE_VALUES, split_path, cache_from_env
+from swift.common.utils import TRUE_VALUES, split_path
 from swift.common.http import HTTP_BAD_REQUEST
 from swift.common.constraints import MAX_OBJECT_NAME_LENGTH, \
     MAX_CONTAINER_NAME_LENGTH
-from swift.common.middleware.ratelimit import RateLimitMiddleware
 
 
 MAX_PATH_LENGTH = MAX_OBJECT_NAME_LENGTH + MAX_CONTAINER_NAME_LENGTH + 1
@@ -49,9 +48,8 @@ class Untar(object):
 
     def __init__(self, app, conf):
         self.app = app
-        self.ratelimit = RateLimitMiddleware(app, conf)
         self.max_containers = int(
-            conf.get('max_containers_per_extraction', 100000))
+            conf.get('max_containers_per_extraction', 10000))
         self.max_failed_files = int(
             conf.get('max_failed_files', 10000))
 
@@ -101,12 +99,14 @@ class Untar(object):
                     break
                 if tar_info.isfile():
                     obj_path = tar_info.name
-                    print "ffff: %s" % obj_path
                     if obj_path.startswith('./'):
                         obj_path = obj_path[2:]
                     obj_path = obj_path.lstrip('/')
                     if extract_base:
                         obj_path = extract_base + '/' + obj_path
+
+                    if '/' not in obj_path:
+                        continue  # ignore base level file
 
                     destination = '/'.join(
                         ['', vrs, account, obj_path])
@@ -117,7 +117,6 @@ class Untar(object):
                                 self.create_container_for_path(req,
                                                                destination))
                         except CreateContainerError, err:
-                            print "vvvvvvvvvvvvvvvvvvvv"
                             failed_files.append(
                                 (destination[:MAX_PATH_LENGTH], err.status))
                             continue
@@ -137,10 +136,6 @@ class Untar(object):
                     new_env['PATH_INFO'] = destination
                     new_env['CONTENT_LENGTH'] = tar_info.size
                     create_obj_req = Request.blank(destination, new_env)
-                    ratelimit_resp = self.ratelimit.handle_ratelimit(
-                        create_obj_req, account, container, obj_path)
-                    if ratelimit_resp:
-                        return ratelimit_resp
                     resp = create_obj_req.get_response(self.app)
                     if resp.status_int // 100 == 2:
                         success_count += 1
@@ -156,15 +151,12 @@ class Untar(object):
             if failed_files:
                 return HTTPBadGateway(resp_body)
 
-            print "tttttttttttttttttttttttttttttttttttttttttttt"
             return HTTPBadRequest('Invalid Tar File: No Valid Files')
 
         except tarfile.TarError, tar_error:
             return HTTPBadRequest('Invalid Tar File: %s' % tar_error)
 
     def __call__(self, env, start_response):
-        if self.ratelimit.memcache_client is None:
-            self.ratelimit.memcache_client = cache_from_env(env)
         req = Request(env)
         extract_type = \
             req.headers.get('X-Extract-Archive', '').lower().strip('.')
