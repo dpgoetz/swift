@@ -52,7 +52,7 @@ class Untar(object):
         self.max_containers = int(
             conf.get('max_containers_per_extraction', 10000))
         self.max_failed_files = int(
-            conf.get('max_failed_files', 10000))
+            conf.get('max_failed_files', 1000))
 
     def create_container_for_path(self, req, file_path):
         """

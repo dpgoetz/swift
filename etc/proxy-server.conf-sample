@@ -336,4 +336,4 @@ use = egg:swift#proxy_logging
 [filter:untar]
 use = egg:swift#untar
 # max_containers_per_extraction = 10000
-# max_failed_files = 10000
+# max_failed_files = 1000
