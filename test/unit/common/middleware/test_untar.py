@@ -33,6 +33,12 @@ class FakeApp(object):
             return Response(status='201 Created')(env, start_response)
         if env['PATH_INFO'].startswith('/create_cont_fail/'):
             return Response(status='404 Not Found')(env, start_response)
+        if env['PATH_INFO'].startswith('/create_cont_unauth/'):
+            return Response(status=401)(env, start_response)
+        if env['PATH_INFO'].startswith('/create_obj_unauth/'):
+            if env['PATH_INFO'].endswith('/cont'):
+                return Response(status='201 Created')(env, start_response)
+            return Response(status=401)(env, start_response)
         if env['PATH_INFO'].startswith('/tar_works/'):
             if len(env['PATH_INFO']) > 100:
                 return Response(status='400 Bad Request')(env, start_response)
@@ -195,6 +201,22 @@ class TestUntar(unittest.TestCase):
         resp = self.untar.handle_extract(req, '')
         resp_data = simplejson.loads(resp.body)
         self.assertEquals(resp_data['Number Created Files'], 4)
+
+    def test_extract_tar_fail_cont_401(self):
+        tar = self.build_tar()
+        req = Request.blank('/create_cont_unauth/acc/')
+        req.environ['wsgi.input'] = open(os.path.join(self.testdir,
+                                                      'tar_fails.tar'))
+        resp = self.untar.handle_extract(req, '')
+        self.assertEquals(resp.status_int, 401)
+
+    def test_extract_tar_fail_obj_401(self):
+        tar = self.build_tar()
+        req = Request.blank('/create_obj_unauth/acc/cont/')
+        req.environ['wsgi.input'] = open(os.path.join(self.testdir,
+                                                      'tar_fails.tar'))
+        resp = self.untar.handle_extract(req, '')
+        self.assertEquals(resp.status_int, 401)
 
     def test_extract_tar_fail_obj_name_len(self):
         tar = self.build_tar()

@@ -2,9 +2,9 @@ import tarfile
 from urllib import quote, unquote
 import simplejson
 from swift.common.swob import Request, HTTPBadGateway, HTTPServerError, \
-    HTTPCreated, HTTPBadRequest, HTTPNotFound
+    HTTPCreated, HTTPBadRequest, HTTPNotFound, HTTPUnauthorized
 from swift.common.utils import TRUE_VALUES, split_path
-from swift.common.http import HTTP_BAD_REQUEST
+from swift.common.http import HTTP_BAD_REQUEST, HTTP_UNAUTHORIZED
 from swift.common.constraints import MAX_OBJECT_NAME_LENGTH, \
     MAX_CONTAINER_NAME_LENGTH
 
@@ -13,7 +13,8 @@ MAX_PATH_LENGTH = MAX_OBJECT_NAME_LENGTH + MAX_CONTAINER_NAME_LENGTH + 1
 
 
 class CreateContainerError(Exception):
-    def __init__(self, msg, status):
+    def __init__(self, msg, status_int, status):
+        self.status_int = status_int
         self.status = status
         Exception.__init__(self, msg)
 
@@ -70,7 +71,8 @@ class Untar(object):
         resp = create_cont_req.get_response(self.app)
         if resp.status_int // 100 != 2:
             raise CreateContainerError(
-                "Create Container Failed: " + container_path, resp.status)
+                "Create Container Failed: " + container_path,
+                resp.status_int, resp.status)
         return container
 
     def handle_extract(self, req, compress_type):
@@ -117,6 +119,8 @@ class Untar(object):
                                 self.create_container_for_path(req,
                                                                destination))
                         except CreateContainerError, err:
+                            if err.status_int == HTTP_UNAUTHORIZED:
+                                return HTTPUnauthorized(request=req)
                             failed_files.append(
                                 (destination[:MAX_PATH_LENGTH], err.status))
                             continue
@@ -140,6 +144,8 @@ class Untar(object):
                     if resp.status_int // 100 == 2:
                         success_count += 1
                     else:
+                        if resp.status_int == HTTP_UNAUTHORIZED:
+                            return HTTPUnauthorized(request=req)
                         failed_files.append(
                             (destination[:MAX_PATH_LENGTH], resp.status))
 

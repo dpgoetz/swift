@@ -172,6 +172,13 @@ Proxy Logging
     :members:
     :show-inheritance:
 
+Archive Auto Extraction
+=======================
+
+.. automodule:: swift.common.middleware.untar
+    :members:
+    :show-inheritance:
+
 CORS Headers
 ============
 
