@@ -1,6 +1,6 @@
-====================
-Large Object Support
-====================
+============================
+Dynamic Large Object Support
+============================
 
 --------
 Overview
@@ -134,8 +134,8 @@ Additional Notes
 History
 -------
 
-Large object support has gone through various iterations before settling on
-this implementation.
+Dynamic large object support has gone through various iterations before
+settling on this implementation.
 
 The primary factor driving the limitation of object size in swift is
 maintaining balance among the partitions of the ring.  To maintain an even
