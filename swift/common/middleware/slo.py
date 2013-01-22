@@ -118,7 +118,6 @@ class StaticLargeObject(object):
     of the concatenated objects.
     """
 
-
     def __init__(self, app, conf):
         pass
 
