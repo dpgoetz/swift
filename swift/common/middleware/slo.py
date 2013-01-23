@@ -13,6 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from xml.etree import ElementTree
+from xml.parsers.expat import ExpatError
+from swift.common.swob import Request, HTTPBadRequest
+from swift.common.wsgi import WSGIContext
+from swift.common.utils import split_path
+
+
+class _StaticLargeObjectContext(WSGIContent):
+    """
+    WSGI Context used by StaticLargeObject to wrap every GET request. If the
+    object being returned is a StaticLargeObject manifest will override the
+    reponse and return the concatenated segments specified in the manifest.
+    """
+
+    def __init__(self, slo):
+        self.app = slo.app
+
 
 class StaticLargeObject(object):
     """
@@ -32,14 +49,14 @@ class StaticLargeObject(object):
     The body of this request will be an ordered list of files in
     json or xml. The data to be supplied for each segment is:
 
-    path: the path to the object Account/container/object_name
+    path: the path to the object (not including account) /container/object_name
     etag: the etag given back when the object segment was PUT
     size_bytes: the size of the object in bytes
 
     The format of the list will be:
 
     json:
-    [{'path': '/AUTH_Acc/cont/object',
+    [{'path': '/cont/object',
       'etag': 'etagoftheobjectsegment',
       'size_bytes': 100}, ...]
 
@@ -47,7 +64,7 @@ class StaticLargeObject(object):
     <?xml version="1.0" encoding="UTF-8"?>
     <static_large_object>
         <object_segment>
-            <path>/AUTH_Acc/cont/object</path>
+            <path>/cont/object</path>
             <etag>etagoftheobjecitsegment</etag>
             <size_bytes>100</size_bytes>
         </object_segment>
@@ -89,14 +106,14 @@ class StaticLargeObject(object):
 
     Will return the actual manifest file itself.
 
-    A DELETE request will delete all the objects referenced in the manifest
-    file. The response will be similar to the bulk delete middleware.
+    A DELETE request will just delete the manifest file itself.
 
     A DELETE with a query parameter:
 
     ?multipart-manifest=delete
 
-    Will just delete the manifest file itself.
+    will delete all the objects referenced in the manifest
+    file. The response will be similar to the bulk delete middleware.
 
     PUTs / POSTs will work as expected, PUTs will overwrite the manifest object
     for example.
@@ -119,7 +136,65 @@ class StaticLargeObject(object):
     """
 
     def __init__(self, app, conf):
-        pass
+        self.conf = conf
+        self.app = app
+        self.max_segments = int(self.conf.get('max_manifest_segments', 1000))
+        self.max_manifest_size = int(self.conf.get('max_manifest_size',
+                                     1024*1024*2))
+
+    def parse_input(req):
+        """
+        Given a request will parse the body and return a list of dictionaries
+        :raises: HTTPException on parse errors
+        :returns: a list of dictionaries on success
+        """
+
+        if req.content_length > self.max_manifest_size:
+            raise HTTPBadRequest(
+                "Manifest File > %d bytes" % self.max_manifest_size)
+        raw_data = req.body.read(self.max_manifest_size)
+        parsed_data = []
+        if req.content_type == 'application/json':
+            parsed_data = json.loads(raw_data)
+        elif req.content_type in ['application/xml', 'text/xml']:
+
+            try:
+                xml_tree_root = ElementTree.fromstring(raw_data)
+            except ExpatError:
+                raise HTTPBadRequest('Invalid XML document')
+            if xml_tree_root.tag != 'static_large_object':
+                raise HTTPBadRequest('Invalid XML document')
+            for obj_segment in xml_tree_root:
+                if obj_segment.tag != 'object_segment':
+                    raise HTTPBadRequest('Invalid XML document')
+                seg_dict = dict(
+                    [(elem.tag, elem.text) for elem in obj_segment])
+                parsed_data.append(seg_dict)
+        else:
+            raise HTTPBadRequest("Invalid Content-Type, accepts json and xml")
+        if len(parsed_data) > self.max_manifest_segments:
+            raise HTTPBadRequest(
+                'Number segments must be <= %d' % self.max_manifest_segments)
+
+        return parsed_data
+
+
+    def __call__(self, env, start_response):
+        """
+        WSGI entry point
+        """
+        req = Request(env)
+        try:
+            vrs, account, container, obj = split_path(req.path, 1, 4, True)
+        except ValueError:
+            return self.app(env, start_response)
+        if obj:
+            if req.method == 'PUT' and \
+                    req.params.get('multipart-manifest') == 'put':
+                return self.handle_multipart_put(req, vrs, account)
+            if req.method == 'DELETE' and \
+                    req.params.get('multipart-manifest') == 'delete':
+                return self.handle_multipart_delete(req, vrs, account)
 
 
 def filter_factory(global_conf, **local_conf):
