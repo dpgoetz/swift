@@ -189,6 +189,8 @@ class StaticLargeObject(object):
         allow the request to proceed normally with some modified headers.
         """
         parsed_data = self.parse_input(req)
+        problem_segments = []
+        total_size = 0
         for seg_dict in parsed_data:
             obj_path = '/'.join(vrs, account, seg_dict['path'].lstrip('/'))
             new_env = req.environ.copy()
@@ -204,7 +206,15 @@ class StaticLargeObject(object):
                     seg_size = int(seg_dict['size_bytes'])
                 except (ValueError, TypeError):
                     raise HTTPBadRequest('Invalid Manifest File')
-                problem_segments.append(obj_path)
+                total_size += seg_size
+                if seg_size != head_seg_resp.content_length:
+                    problem_segments.append([obj_path, 'Size Mismatch'])
+                if seg_dict['etag'] != head_seg_resp.etag:
+                    problem_segments.append([obj_path, 'Etag Mismatch'])
+            else:
+                problem_segments.append([obj_path, head_seg_resp.status])
+        if problem_segments:
+            pass
 
 
     def __call__(self, env, start_response):
