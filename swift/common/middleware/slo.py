@@ -15,12 +15,20 @@
 
 from xml.etree import ElementTree
 from xml.parsers.expat import ExpatError
-from swift.common.swob import Request, HTTPBadRequest
+from urllib import quote
+from cStringIO import StringIO
+try:
+    import simplejson as json
+except ImportError:
+    import json
+from swift.common.swob import Request, HTTPBadRequest, HTTPNotAcceptable, \
+    catch_http_exception
 from swift.common.wsgi import WSGIContext
 from swift.common.utils import split_path
+from swift.common.middleware.bulk import get_response_body, ACCEPTABLE_FORMATS
 
 
-class _StaticLargeObjectContext(WSGIContent):
+class _StaticLargeObjectContext(WSGIContext):
     """
     WSGI Context used by StaticLargeObject to wrap every GET request. If the
     object being returned is a StaticLargeObject manifest will override the
@@ -32,6 +40,136 @@ class _StaticLargeObjectContext(WSGIContent):
 
 
 class StaticLargeObject(object):
+
+    def __init__(self, app, conf):
+        self.conf = conf
+        self.app = app
+        self.max_manifest_segments = int(self.conf.get('max_manifest_segments',
+                                         1000))
+        self.max_manifest_size = int(self.conf.get('max_manifest_size',
+                                     1024*1024*2))
+
+    def parse_input(self, req, raw_data):
+        """
+        Given a request will parse the body and return a list of dictionaries
+        :raises: HTTPException on parse errors
+        :returns: a list of dictionaries on success
+        """
+
+        parsed_data = []
+        incoming_format = req.params.get('format')
+        if incoming_format == 'json':
+            parsed_data = json.loads(raw_data)
+        elif incoming_format == 'xml':
+            try:
+                xml_tree_root = ElementTree.fromstring(raw_data)
+            except ExpatError:
+                raise HTTPBadRequest('Invalid XML document')
+            if xml_tree_root.tag != 'static_large_object':
+                raise HTTPBadRequest('Invalid XML document')
+            for obj_segment in xml_tree_root:
+                if obj_segment.tag != 'object_segment':
+                    raise HTTPBadRequest('Invalid XML document')
+                seg_dict = dict(
+                    [(elem.tag, elem.text) for elem in obj_segment])
+                parsed_data.append(seg_dict)
+        else:
+            raise HTTPBadRequest("Invalid manifest format, accepts "
+                                 "query parameter format=json or format=xml")
+        if len(parsed_data) > self.max_manifest_segments:
+            raise HTTPBadRequest(
+                'Number segments must be <= %d' % self.max_manifest_segments)
+
+        req_keys = set(['path', 'etag', 'size_bytes'])
+        for seg_dict in parsed_data:
+            if set(seg_dict.keys()) != req_keys:
+                raise HTTPBadRequest('Invalid Manifest File')
+
+        return parsed_data
+
+    def handle_multipart_put(self, req, env, start_response, vrs, account):
+        """
+        Will handle the PUT of a SLO manifest.
+        Heads every object in manifest to check if is valid and if so will
+        allow the request to proceed normally with some modified headers.
+        """
+        if req.content_length > self.max_manifest_size:
+            raise HTTPBadRequest(
+                "Manifest File > %d bytes" % self.max_manifest_size)
+        raw_data = req.body_file.read(self.max_manifest_size)
+        parsed_data = self.parse_input(req, raw_data)
+        problem_segments = []
+        total_size = 0
+        out_content_type = req.accept.best_match(ACCEPTABLE_FORMATS)
+        if not out_content_type:
+            raise HTTPNotAcceptable(request=req)
+        for seg_dict in parsed_data:
+            obj_path = '/'.join(
+                ['', vrs, account, seg_dict['path'].lstrip('/')])
+            new_env = req.environ.copy()
+            new_env['PATH_INFO'] = obj_path
+            new_env['REQUEST_METHOD'] = 'HEAD'
+            del(new_env['wsgi.input'])
+            new_env['CONTENT_LENGTH'] = 0
+            new_env['HTTP_USER_AGENT'] = \
+                '%s MultipartPUT' % req.environ.get('HTTP_USER_AGENT')
+            head_seg_resp = \
+                Request.blank(obj_path, new_env).get_response(self.app)
+            if head_seg_resp.status_int // 100 == 2:
+                try:
+                    seg_size = int(seg_dict['size_bytes'])
+                except (ValueError, TypeError):
+                    raise HTTPBadRequest('Invalid Manifest File')
+                total_size += seg_size
+                if seg_size != head_seg_resp.content_length:
+                    problem_segments.append([quote(obj_path), 'Size Mismatch'])
+                if seg_dict['etag'] != head_seg_resp.etag:
+                    problem_segments.append([quote(obj_path), 'Etag Mismatch'])
+            else:
+                problem_segments.append([quote(obj_path),
+                                         head_seg_resp.status])
+        if problem_segments:
+            resp_body = get_response_body(
+                out_content_type, {}, problem_segments)
+            raise HTTPBadRequest(resp_body, content_type=out_content_type)
+        env['CONTENT_TYPE'] = \
+            env.get('CONTENT_TYPE', '') + ";slo_size=%d" % total_size
+        env['swift.extra_allowed_headers'] = \
+            env.get('swift.extra_allowed_headers',
+                    []).append('X-Static-Large-Object')
+        env['HTTP_X_STATIC_LARGE_OBJECT'] = 'True'
+        env['wsgi.input'] = StringIO(raw_data)
+        return self.app(env, start_response)
+
+    @catch_http_exception
+    def __call__(self, env, start_response):
+        """
+        WSGI entry point
+        """
+        req = Request(env)
+        try:
+            vrs, account, container, obj = split_path(req.path, 1, 4, True)
+        except ValueError:
+            return self.app(env, start_response)
+        if obj:
+            if req.method == 'PUT' and \
+                    req.params.get('multipart-manifest') == 'put':
+                return self.handle_multipart_put(req, env, start_response,
+                                                 vrs, account)
+            if req.method == 'DELETE' and \
+                    req.params.get('multipart-manifest') == 'delete':
+                return self.handle_multipart_delete(req, vrs, account)
+        return self.app(env, start_response)
+
+
+def filter_factory(global_conf, **local_conf):
+    conf = global_conf.copy()
+    conf.update(local_conf)
+
+    def slo_filter(app):
+        return StaticLargeObject(app, conf)
+    return slo_filter
+
     """
     Middleware that will provide Static Large Object (SLO) support.
 
@@ -44,7 +182,7 @@ class StaticLargeObject(object):
     After the user has uploaded the objects to be concatenated a manifest is
     uploaded. The request must be a PUT with the query parameter:
 
-    ?multipart-manifest=put
+    ?multipart-manifest=put&format=(json|xml)
 
     The body of this request will be an ordered list of files in
     json or xml. The data to be supplied for each segment is:
@@ -134,111 +272,3 @@ class StaticLargeObject(object):
     the size listed for the manifest file will be listed as the total_size
     of the concatenated objects.
     """
-
-    def __init__(self, app, conf):
-        self.conf = conf
-        self.app = app
-        self.max_segments = int(self.conf.get('max_manifest_segments', 1000))
-        self.max_manifest_size = int(self.conf.get('max_manifest_size',
-                                     1024*1024*2))
-
-    def parse_input(req):
-        """
-        Given a request will parse the body and return a list of dictionaries
-        :raises: HTTPException on parse errors
-        :returns: a list of dictionaries on success
-        """
-
-        if req.content_length > self.max_manifest_size:
-            raise HTTPBadRequest(
-                "Manifest File > %d bytes" % self.max_manifest_size)
-        raw_data = req.body.read(self.max_manifest_size)
-        parsed_data = []
-        if req.content_type == 'application/json':
-            parsed_data = json.loads(raw_data)
-        elif req.content_type in ['application/xml', 'text/xml']:
-            try:
-                xml_tree_root = ElementTree.fromstring(raw_data)
-            except ExpatError:
-                raise HTTPBadRequest('Invalid XML document')
-            if xml_tree_root.tag != 'static_large_object':
-                raise HTTPBadRequest('Invalid XML document')
-            for obj_segment in xml_tree_root:
-                if obj_segment.tag != 'object_segment':
-                    raise HTTPBadRequest('Invalid XML document')
-                seg_dict = dict(
-                    [(elem.tag, elem.text) for elem in obj_segment])
-                parsed_data.append(seg_dict)
-        else:
-            raise HTTPBadRequest("Invalid Content-Type, accepts json and xml")
-        if len(parsed_data) > self.max_manifest_segments:
-            raise HTTPBadRequest(
-                'Number segments must be <= %d' % self.max_manifest_segments)
-
-        req_keys = set(['path', 'etag', 'size_bytes'])
-        for seg_dict in parsed_data:
-            if set(seg_dict.keys()) != req_keys:
-                raise HTTPBadRequest('Invalid Manifest File')
-
-        return parsed_data
-
-    def handle_multipart_put(self, req, vrs, account):
-        """
-        Will handle the PUT of a SLO manifest.
-        Heads every object in manifest to check if is valid and if so will
-        allow the request to proceed normally with some modified headers.
-        """
-        parsed_data = self.parse_input(req)
-        problem_segments = []
-        total_size = 0
-        for seg_dict in parsed_data:
-            obj_path = '/'.join(vrs, account, seg_dict['path'].lstrip('/'))
-            new_env = req.environ.copy()
-            new_env['PATH_INFO'] = obj_path
-            new_env['METHOD'] = 'HEAD'
-            del(new_env['wsgi.input'])
-            new_env['HTTP_USER_AGENT'] = \
-                '%s MultipartPUT' % req.environ.get('HTTP_USER_AGENT')
-            head_seg_resp = \
-                Request.blank(obj_path, new_env).get_response(self.app)
-            if head_seg_resp.status_int // 100 == 2:
-                try:
-                    seg_size = int(seg_dict['size_bytes'])
-                except (ValueError, TypeError):
-                    raise HTTPBadRequest('Invalid Manifest File')
-                total_size += seg_size
-                if seg_size != head_seg_resp.content_length:
-                    problem_segments.append([obj_path, 'Size Mismatch'])
-                if seg_dict['etag'] != head_seg_resp.etag:
-                    problem_segments.append([obj_path, 'Etag Mismatch'])
-            else:
-                problem_segments.append([obj_path, head_seg_resp.status])
-        if problem_segments:
-            pass
-
-
-    def __call__(self, env, start_response):
-        """
-        WSGI entry point
-        """
-        req = Request(env)
-        try:
-            vrs, account, container, obj = split_path(req.path, 1, 4, True)
-        except ValueError:
-            return self.app(env, start_response)
-        if obj:
-            if req.method == 'PUT' and \
-                    req.params.get('multipart-manifest') == 'put':
-                return self.handle_multipart_put(req, vrs, account)
-            if req.method == 'DELETE' and \
-                    req.params.get('multipart-manifest') == 'delete':
-                return self.handle_multipart_delete(req, vrs, account)
-
-
-def filter_factory(global_conf, **local_conf):
-    conf = global_conf.copy()
-    conf.update(local_conf)
-
-    def slo_filter(app):
-        return StaticLargeObject(app, conf)
-    return slo_filter

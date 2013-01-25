@@ -42,6 +42,41 @@ ACCEPTABLE_FORMATS = ['text/plain', 'application/json', 'application/xml',
                       'text/xml']
 
 
+def get_response_body(data_format, data_dict, error_list):
+    """
+    Returns a properly formatted response body according to format.
+    :params data_format: resulting format
+    :params data_dict: generated data about results.
+    :params error_list: list of quoted filenames that failed
+    """
+    if data_format == 'text/plain':
+        output = ''
+        for key in sorted(data_dict.keys()):
+            output += '%s: %s\n' % (key, data_dict[key])
+        output += 'Errors:\n'
+        output += '\n'.join(
+            ['%s, %s' % (name, status)
+             for name, status in error_list])
+        return output
+    if data_format == 'application/json':
+        data_dict['Errors'] = error_list
+        return json.dumps(data_dict)
+    if data_format.endswith('/xml'):
+        output = '<?xml version="1.0" encoding="UTF-8"?>\n<delete>\n'
+        for key in sorted(data_dict.keys()):
+            xml_key = key.replace(' ', '_').lower()
+            output += '<%s>%s</%s>\n' % (xml_key, data_dict[key], xml_key)
+        output += '<errors>\n'
+        output += '\n'.join(
+            ['<object>'
+             '<name>%s</name><status>%s</status>'
+             '</object>' % (saxutils.escape(name), status) for
+             name, status in error_list])
+        output += '</errors>\n</delete>\n'
+        return output
+    raise HTTPNotAcceptable('Invalid output type')
+
+
 class Bulk(object):
     """
     Middleware that will do many operations on a single request.
@@ -158,39 +193,6 @@ class Bulk(object):
                 raise HTTPBadRequest('Invalid File Name')
         return objs_to_delete
 
-    def get_response_body(self, data_format, data_dict, error_list):
-        """
-        Returns a properly formatted response body according to format.
-        :params data_format: resulting format
-        :params data_dict: generated data about results.
-        :params error_list: list of quoted filenames that failed
-        """
-        if data_format == 'text/plain':
-            output = ''
-            for key in sorted(data_dict.keys()):
-                output += '%s: %s\n' % (key, data_dict[key])
-            output += 'Errors:\n'
-            output += '\n'.join(
-                ['%s, %s' % (name, status)
-                 for name, status in error_list])
-            return output
-        if data_format == 'application/json':
-            data_dict['Errors'] = error_list
-            return json.dumps(data_dict)
-        if data_format.endswith('/xml'):
-            output = '<?xml version="1.0" encoding="UTF-8"?>\n<delete>\n'
-            for key in sorted(data_dict.keys()):
-                xml_key = key.replace(' ', '_').lower()
-                output += '<%s>%s</%s>\n' % (xml_key, data_dict[key], xml_key)
-            output += '<errors>\n'
-            output += '\n'.join(
-                ['<object>'
-                 '<name>%s</name><status>%s</status>'
-                 '</object>' % (saxutils.escape(name), status) for
-                 name, status in error_list])
-            output += '</errors>\n</delete>\n'
-            return output
-        raise HTTPNotAcceptable('Invalid output type')
 
     def handle_delete(self, req):
         """
@@ -244,7 +246,7 @@ class Bulk(object):
                     failed_file_response_type = HTTPBadGateway
                 failed_files.append([quote(delete_path), resp.status])
 
-        resp_body = self.get_response_body(
+        resp_body = get_response_body(
             out_content_type,
             {'Number Deleted': success_count,
              'Number Not Found': not_found_count},
@@ -350,7 +352,7 @@ class Bulk(object):
                         failed_files.append([
                             quote(destination[:MAX_PATH_LENGTH]), resp.status])
 
-            resp_body = self.get_response_body(
+            resp_body = get_response_body(
                 out_content_type,
                 {'Number Files Created': success_count},
                 failed_files)

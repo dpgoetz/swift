@@ -418,6 +418,7 @@ class ObjectController(object):
             content-encoding,
             x-delete-at,
             x-object-manifest,
+            x-static-large-object,
         '''
         self.allowed_headers = set(
             i.strip().lower() for i in

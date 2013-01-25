@@ -57,6 +57,20 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPClientDisconnect
 
 
+def copy_headers_into(from_r, to_r):
+    """
+    Will copy desired headers from from_r to to_r
+    :params from_r: a swob Request or Response
+    :params to_r: a swob Request or Response
+    """
+    for k, v in from_r.headers.items():
+        if k.lower().startswith('x-object-meta-'):
+            to_r.headers[k] = v
+    for extra_header in from_r.environ.get('swift.extra_allowed_headers', []):
+        if extra_header in from_r.headers:
+            to_r.headers[extra_header] = from_r.headers[extra_header]
+
+
 class SegmentedIterable(object):
     """
     Iterable that returns the object contents for a segmented object in Swift.
@@ -734,12 +748,9 @@ class ObjectController(Controller):
                     source_resp.headers['Content-Type']
             if not config_true_value(
                     new_req.headers.get('x-fresh-metadata', 'false')):
-                for k, v in source_resp.headers.items():
-                    if k.lower().startswith('x-object-meta-'):
-                        new_req.headers[k] = v
-                for k, v in req.headers.items():
-                    if k.lower().startswith('x-object-meta-'):
-                        new_req.headers[k] = v
+                copy_headers_into(source_resp, new_req)
+                copy_headers_into(req, new_req)
+
             req = new_req
         node_iter = self.iter_nodes(partition, nodes, self.app.object_ring)
         pile = GreenPile(len(nodes))
@@ -857,9 +868,7 @@ class ObjectController(Controller):
             if 'last-modified' in source_resp.headers:
                 resp.headers['X-Copied-From-Last-Modified'] = \
                     source_resp.headers['last-modified']
-            for k, v in req.headers.items():
-                if k.lower().startswith('x-object-meta-'):
-                    resp.headers[k] = v
+            copy_headers_into(req, resp)
         resp.last_modified = float(req.headers['X-Timestamp'])
         return resp
 

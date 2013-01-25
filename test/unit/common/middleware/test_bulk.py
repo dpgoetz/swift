@@ -385,8 +385,8 @@ class TestUntar(unittest.TestCase):
 
     def test_get_response_body(self):
         self.assertRaises(
-            HTTPException, self.bulk.get_response_body, 'badformat', {}, [])
-        xml_body = self.bulk.get_response_body(
+            HTTPException, bulk.get_response_body, 'badformat', {}, [])
+        xml_body = bulk.get_response_body(
             'text/xml', {'hey': 'there'}, [['json > xml', '202 Accepted']])
         self.assert_('&gt' in xml_body)
 

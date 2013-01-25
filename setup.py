@@ -94,7 +94,6 @@ setup(
             'domain_remap=swift.common.middleware.domain_remap:filter_factory',
             'staticweb=swift.common.middleware.staticweb:filter_factory',
             'tempauth=swift.common.middleware.tempauth:filter_factory',
-            'slo=swift.common.middleware.slo:filter_factory',
             'keystoneauth=swift.common.middleware.keystoneauth:filter_factory',
             'recon=swift.common.middleware.recon:filter_factory',
             'tempurl=swift.common.middleware.tempurl:filter_factory',
@@ -103,6 +102,7 @@ setup(
             'proxy_logging='
             'swift.common.middleware.proxy_logging:filter_factory',
             'bulk=swift.common.middleware.bulk:filter_factory',
+            'slo=swift.common.middleware.slo:filter_factory',
         ],
     },
 )
