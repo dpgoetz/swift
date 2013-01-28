@@ -17,6 +17,7 @@ from xml.etree import ElementTree
 from xml.parsers.expat import ExpatError
 from urllib import quote
 from cStringIO import StringIO
+from datetime import datetime
 try:
     import simplejson as json
 except ImportError:
@@ -24,8 +25,42 @@ except ImportError:
 from swift.common.swob import Request, HTTPBadRequest, HTTPNotAcceptable, \
     catch_http_exception
 from swift.common.wsgi import WSGIContext
-from swift.common.utils import split_path
+from swift.common.utils import split_path, TRUE_VALUES
 from swift.common.middleware.bulk import get_response_body, ACCEPTABLE_FORMATS
+
+
+def parse_input(raw_data, data_format):
+    """
+    Given a request will parse the body and return a list of dictionaries
+    :raises: HTTPException on parse errors
+    :returns: a list of dictionaries on success
+    """
+    parsed_data = []
+    if data_format == 'json':
+        parsed_data = json.loads(raw_data)
+    elif data_format == 'xml':
+        try:
+            xml_tree_root = ElementTree.fromstring(raw_data)
+        except ExpatError:
+            raise HTTPBadRequest('Invalid XML document')
+        if xml_tree_root.tag != 'static_large_object':
+            raise HTTPBadRequest('Invalid XML document')
+        for obj_segment in xml_tree_root:
+            if obj_segment.tag != 'object_segment':
+                raise HTTPBadRequest('Invalid XML document')
+            seg_dict = dict(
+                [(elem.tag, elem.text) for elem in obj_segment])
+            parsed_data.append(seg_dict)
+    else:
+        raise HTTPBadRequest("Invalid manifest format, accepts "
+                             "query parameter format=json or format=xml")
+
+    req_keys = set(['path', 'etag', 'size_bytes'])
+    for seg_dict in parsed_data:
+        if set(seg_dict.keys()) != req_keys:
+            raise HTTPBadRequest('Invalid Manifest File')
+
+    return parsed_data
 
 
 class _StaticLargeObjectContext(WSGIContext):
@@ -35,9 +70,51 @@ class _StaticLargeObjectContext(WSGIContext):
     reponse and return the concatenated segments specified in the manifest.
     """
 
-    def __init__(self, slo):
+    def __init__(self, slo, env):
+        WSGIContext.__init__(self, slo.app)
         self.app = slo.app
 
+    def override_headers(self, resp):
+        """
+        Overrides headers
+        """
+        cur_resp_status = int(self._response_status.split(' ', 1)[0])
+        if cur_resp_status != 200:
+            return None
+        content_type = resp.headers.get('Content-Type', '')
+        content_length = None
+        if ';' in content_type:
+            content_type, slo_size = content_type.rsplit(';', 1)
+            if slo_size.startswith('slo_size='):
+                slo_size = slo_size[len('slo_size='):]
+                if not isdigit(slo_size):
+                    raise HTTPInternalServerError(
+                        'Invalid SLO Manifest Content-Type')
+                content_length = int(slo_size)
+        if content_length is None:
+            raise HTTPInternalServerError('Invalid SLO Manifest Content-Type')
+        resp.headers['Content-Type'] = content_type
+        resp.content_length = content_length
+        return resp
+
+    def slo_wrap_get_head(self, env, start_response):
+        """
+        Checks to see whether this is a Static Large Object. If so, overrides
+        the response.
+        """
+        app_resp = self._app_call(env)
+        if app_resp.headers.get('X-Static-Large-Object', '').lower() in \
+                ['json', 'xml']:
+            if env.method == 'HEAD':
+                head_resp = self.override_headers(app_resp)
+                if head_resp:
+                    return head_resp(env, start_response)
+            elif env.method == 'GET':
+                return self.slo_get(env, app_resp)
+        start_response(self._response_status,
+                       self._response_headers,
+                       self._response_exc_info)
+        return app_resp
 
 class StaticLargeObject(object):
 
@@ -49,44 +126,6 @@ class StaticLargeObject(object):
         self.max_manifest_size = int(self.conf.get('max_manifest_size',
                                      1024*1024*2))
 
-    def parse_input(self, req, raw_data):
-        """
-        Given a request will parse the body and return a list of dictionaries
-        :raises: HTTPException on parse errors
-        :returns: a list of dictionaries on success
-        """
-
-        parsed_data = []
-        incoming_format = req.params.get('format')
-        if incoming_format == 'json':
-            parsed_data = json.loads(raw_data)
-        elif incoming_format == 'xml':
-            try:
-                xml_tree_root = ElementTree.fromstring(raw_data)
-            except ExpatError:
-                raise HTTPBadRequest('Invalid XML document')
-            if xml_tree_root.tag != 'static_large_object':
-                raise HTTPBadRequest('Invalid XML document')
-            for obj_segment in xml_tree_root:
-                if obj_segment.tag != 'object_segment':
-                    raise HTTPBadRequest('Invalid XML document')
-                seg_dict = dict(
-                    [(elem.tag, elem.text) for elem in obj_segment])
-                parsed_data.append(seg_dict)
-        else:
-            raise HTTPBadRequest("Invalid manifest format, accepts "
-                                 "query parameter format=json or format=xml")
-        if len(parsed_data) > self.max_manifest_segments:
-            raise HTTPBadRequest(
-                'Number segments must be <= %d' % self.max_manifest_segments)
-
-        req_keys = set(['path', 'etag', 'size_bytes'])
-        for seg_dict in parsed_data:
-            if set(seg_dict.keys()) != req_keys:
-                raise HTTPBadRequest('Invalid Manifest File')
-
-        return parsed_data
-
     def handle_multipart_put(self, req, env, start_response, vrs, account):
         """
         Will handle the PUT of a SLO manifest.
@@ -97,12 +136,19 @@ class StaticLargeObject(object):
             raise HTTPBadRequest(
                 "Manifest File > %d bytes" % self.max_manifest_size)
         raw_data = req.body_file.read(self.max_manifest_size)
-        parsed_data = self.parse_input(req, raw_data)
+        incoming_format = req.params.get('format')
+        parsed_data = parse_input(raw_data, incoming_format)
         problem_segments = []
+
+        if len(parsed_data) > self.max_manifest_segments:
+            raise HTTPBadRequest(
+                'Number segments must be <= %d' % self.max_manifest_segments)
+
         total_size = 0
         out_content_type = req.accept.best_match(ACCEPTABLE_FORMATS)
         if not out_content_type:
             raise HTTPNotAcceptable(request=req)
+        data_for_storage = []
         for seg_dict in parsed_data:
             obj_path = '/'.join(
                 ['', vrs, account, seg_dict['path'].lstrip('/')])
@@ -110,6 +156,7 @@ class StaticLargeObject(object):
             new_env['PATH_INFO'] = obj_path
             new_env['REQUEST_METHOD'] = 'HEAD'
             del(new_env['wsgi.input'])
+            del(new_env['QUERY_STRING'])
             new_env['CONTENT_LENGTH'] = 0
             new_env['HTTP_USER_AGENT'] = \
                 '%s MultipartPUT' % req.environ.get('HTTP_USER_AGENT')
@@ -125,6 +172,32 @@ class StaticLargeObject(object):
                     problem_segments.append([quote(obj_path), 'Size Mismatch'])
                 if seg_dict['etag'] != head_seg_resp.etag:
                     problem_segments.append([quote(obj_path), 'Etag Mismatch'])
+                if head_seg_resp.last_modified:
+                    last_modified = head_seg_resp.last_modified
+                else:
+                    # shouldn't happen
+                    last_modified = datetime.now()
+
+
+
+                from time import mktime
+                created_at = datetime.utcfromtimestamp(
+                    float(mktime(last_modified.timetuple()))).isoformat()
+                # python isoformat() doesn't include msecs when zero
+                if len(created_at) < len("1970-01-01T00:00:00.000000"):
+                    created_at += ".000000"
+
+
+                last_modified = last_modified.isoformat()
+                if len(last_modified) < len("1970-01-01T00:00:00.000000"):
+                        last_modified += ".000000"
+                data_for_storage.append(
+                    {'name': seg_dict['path'].lstrip('/'),
+                     'bytes': seg_size,
+                     'hash': seg_dict['etag'],
+                     'content_type': head_seg_resp.content_type,
+                     'last_modified': created_at})
+
             else:
                 problem_segments.append([quote(obj_path),
                                          head_seg_resp.status])
@@ -138,7 +211,9 @@ class StaticLargeObject(object):
             env.get('swift.extra_allowed_headers',
                     []).append('X-Static-Large-Object')
         env['HTTP_X_STATIC_LARGE_OBJECT'] = 'True'
-        env['wsgi.input'] = StringIO(raw_data)
+        json_data = json.dumps(data_for_storage)
+        env['CONTENT_LENGTH'] = len(json_data)
+        env['wsgi.input'] = StringIO(json_data)
         return self.app(env, start_response)
 
     @catch_http_exception
@@ -159,6 +234,9 @@ class StaticLargeObject(object):
             if req.method == 'DELETE' and \
                     req.params.get('multipart-manifest') == 'delete':
                 return self.handle_multipart_delete(req, vrs, account)
+#            if env['REQUEST_METHOD']  == 'HEAD':
+#                context = _StaticLargeObjectContext(self, env)
+#                return context.slo_wrap_get_head(env, start_response)
         return self.app(env, start_response)
 
 

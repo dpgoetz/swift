@@ -54,8 +54,9 @@ from swift.proxy.controllers.base import Controller, delay_denial, \
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPRequestTimeout, \
     HTTPServerError, HTTPServiceUnavailable, Request, Response, \
-    HTTPClientDisconnect
+    HTTPClientDisconnect, HTTPOk
 
+from swift.common.middleware.slo import parse_input # move to utils if keep this
 
 def copy_headers_into(from_r, to_r):
     """
@@ -80,7 +81,9 @@ class SegmentedIterable(object):
     status would have already been sent to the client).
 
     :param controller: The ObjectController instance to work with.
-    :param container: The container the object segments are within.
+    :param container: The container the object segments are within. If
+                      container is None will pull container for elements
+                      in listing using lsplit('/', 1).
     :param listing: The listing of object segments to iterate over; this may
                     be an iterator or list that returns dicts with 'name' and
                     'bytes' keys.
@@ -115,11 +118,13 @@ class SegmentedIterable(object):
             self.segment += 1
             self.segment_dict = self.segment_peek or self.listing.next()
             self.segment_peek = None
+            if self.container is None:
+                container, obj = self.segment_dict['name'].split('/', 1)
+            else:
+                container, obj = self.container, self.segment_dict['name']
             partition, nodes = self.controller.app.object_ring.get_nodes(
-                self.controller.account_name, self.container,
-                self.segment_dict['name'])
-            path = '/%s/%s/%s' % (self.controller.account_name, self.container,
-                                  self.segment_dict['name'])
+                self.controller.account_name, container, obj)
+            path = '/%s/%s/%s' % (self.controller.account_name, container, obj)
             req = Request.blank(path)
             if self.seek:
                 req.range = 'bytes=%s-' % self.seek
@@ -189,7 +194,7 @@ class SegmentedIterable(object):
 
     def app_iter_range(self, start, stop):
         """
-        Non-standard iterator function for use with Webob in serving Range
+        Non-standard iterator function for use with Swob in serving Range
         requests more quickly. This will skip over segments and do a range
         request on the first segment to return data from, if needed.
 
@@ -348,7 +353,32 @@ class ObjectController(Controller):
             self.iter_nodes(partition, nodes, self.app.object_ring),
             req.path_info, len(nodes))
 
+        large_object = False
+        if config_true_value(resp.headers.get('x-static-large-object')):
+            if ';' in resp.headers.get('content-type', ''):
+                # strip off slo_size from content_length
+                resp.content_type, slo_size = \
+                    resp.headers['content-type'].rsplit(';', 1)
+            large_object = True
+            listing_page1 = ()
+            lcontainer = None  # container name is included
+            if resp.status_int == HTTPOk and \
+                    req.method == 'GET' and not req.range:
+                listing = json.loads(resp.body)
+            else:
+                # need to make a second request to get whole manifest
+                new_req = req.copy_get()
+                new_req.method = 'GET'
+                new_req.range = None
+                shuffle(nodes)
+                new_resp = self.GETorHEAD_base(
+                    new_req, _('Object'), partition,
+                    self.iter_nodes(partition, nodes, self.app.object_ring),
+                    req.path_info, len(nodes))
+                listing = json.loads(new_resp.body)
+
         if 'x-object-manifest' in resp.headers:
+            large_object = True
             lcontainer, lprefix = \
                 resp.headers['x-object-manifest'].split('/', 1)
             lcontainer = unquote(lcontainer)
@@ -368,6 +398,7 @@ class ObjectController(Controller):
             except StopIteration:
                 listing_page1 = listing = ()
 
+        if large_object:
             if len(listing_page1) >= CONTAINER_LISTING_LIMIT:
                 resp = Response(headers=resp.headers, request=req,
                                 conditional_response=True)
