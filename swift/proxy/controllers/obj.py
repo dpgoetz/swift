@@ -118,7 +118,8 @@ class SegmentedIterable(object):
             self.segment_dict = self.segment_peek or self.listing.next()
             self.segment_peek = None
             if self.container is None:
-                container, obj = self.segment_dict['name'].split('/', 1)
+                container, obj = \
+                    self.segment_dict['name'].lstrip('/').split('/', 1)
             else:
                 container, obj = self.container, self.segment_dict['name']
             partition, nodes = self.controller.app.object_ring.get_nodes(
@@ -353,7 +354,8 @@ class ObjectController(Controller):
             req.path_info, len(nodes))
 
         large_object = False
-        if config_true_value(resp.headers.get('x-static-large-object')):
+        if config_true_value(resp.headers.get('x-static-large-object')) and \
+            req.params.get('multipart-manifest') != 'get':
             if ';' in resp.headers.get('content-type', ''):
                 # strip off slo_size from content_length
                 content_type, slo_size = \

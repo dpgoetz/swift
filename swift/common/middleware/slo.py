@@ -15,6 +15,7 @@
 
 from xml.etree import ElementTree
 from xml.parsers.expat import ExpatError
+from xml.sax import saxutils
 from urllib import quote
 from cStringIO import StringIO
 from datetime import datetime
@@ -28,6 +29,25 @@ from swift.common.wsgi import WSGIContext
 from swift.common.utils import split_path, TRUE_VALUES
 from swift.common.middleware.bulk import get_response_body, \
     ACCEPTABLE_FORMATS, Bulk
+
+
+def format_manifest(data, data_format):
+    """
+    Builds manifest response body out of data in given data_format
+    """
+    if data_format == 'xml':
+        output = \
+            '<?xml version="1.0" encoding="UTF-8"?>\n<static_large_object>\n'
+        for data_dict in data:
+            for key in sorted(data_dict.keys()):
+                output += '<%s>%s</%s>\n' % (
+                    key, saxutils.escape(str(data_dict[key])), key)
+        output += '</static_large_object>\n'
+        return output
+
+    return json.dumps([{'path': o['name'],
+                        'etag': o['hash'],
+                        'size_bytes': o['bytes']} for o in data])
 
 
 def parse_input(raw_data, data_format):
@@ -72,7 +92,7 @@ class StaticLargeObject(object):
         self.max_manifest_segments = int(self.conf.get('max_manifest_segments',
                                          1000))
         self.max_manifest_size = int(self.conf.get('max_manifest_size',
-                                     1024*1024*2))
+                                     1024 * 1024 * 2))
         self.bulk_deleter = Bulk(
             app, {'max_deletes_per_request': self.max_manifest_segments})
 
@@ -131,7 +151,7 @@ class StaticLargeObject(object):
                 last_modified_formatted = \
                     last_modified.strftime('%Y-%m-%dT%H:%M:%S.%f')
                 data_for_storage.append(
-                    {'name': seg_dict['path'].lstrip('/'),
+                    {'name': '/' + seg_dict['path'].lstrip('/'),
                      'bytes': seg_size,
                      'hash': seg_dict['etag'],
                      'content_type': head_seg_resp.content_type,
@@ -147,6 +167,7 @@ class StaticLargeObject(object):
         env = req.environ
         env['CONTENT_TYPE'] = \
             env.get('CONTENT_TYPE', '') + ";slo_size=%d" % total_size
+        # TODO: prob don't need this
         env['swift.extra_allowed_headers'] = \
             env.get('swift.extra_allowed_headers',
                     []).append('X-Static-Large-Object')
@@ -164,7 +185,7 @@ class StaticLargeObject(object):
         new_env = req.environ.copy()
         new_env['REQUEST_METHOD'] = 'GET'
         del(new_env['wsgi.input'])
-        del(new_env['QUERY_STRING'])
+        new_env['QUERY_STRING'] = 'multipart-manifest=get'
         new_env['CONTENT_LENGTH'] = 0
         new_env['HTTP_USER_AGENT'] = \
             '%s MultipartGET' % req.environ.get('HTTP_USER_AGENT')
@@ -173,14 +194,31 @@ class StaticLargeObject(object):
         if get_man_resp.status_int // 100 == 2:
             manifest = json.loads(get_man_resp.body)
             delete_resp = self.bulk_deleter.handle_delete(
-                req, objs_to_delete=[o['name'] for o in manifest]),
+                req, objs_to_delete=[o['name'] for o in manifest],
                 user_agent='MultipartDELETE')
             if delete_resp.status_int // 100 == 2:
+                # delete the manifest file itself
                 return self.app(req.environ, start_response)
             else:
-                return delete_resp
+                return delete_resp  # TODO: this doesn't work need wsgify
         return get_man_resp
 
+    def handle_multipart_get(self, req, start_response):
+        """
+        Will return a Response with the actual manifest itself.
+        :param req: a swob.Request with query string ?multipart-manifest=get
+        """
+        if req.range:
+            return HTTPBadRequest(
+                "Range requests not allowed for retrieving manifest file")
+
+        get_man_resp = req.get_response(self.app)
+        if get_man_resp.status_int // 100 == 2:
+            outgoing_format = req.params.get('format', 'json')
+            manifest_data = json.loads(get_man_resp.body)
+            get_man_resp.body = format_manifest(manifest_data, outgoing_format)
+
+        return get_man_resp(req.environ, start_response)
 
     @catch_http_exception
     def __call__(self, env, start_response):
@@ -189,6 +227,7 @@ class StaticLargeObject(object):
         """
         req = Request(env)
         try:
+            #TODO: the swob split path
             vrs, account, container, obj = split_path(req.path, 1, 4, True)
         except ValueError:
             return self.app(env, start_response)
@@ -200,6 +239,10 @@ class StaticLargeObject(object):
             if req.method == 'DELETE' and \
                     req.params.get('multipart-manifest') == 'delete':
                 return self.handle_multipart_delete(req, start_response)
+
+            if req.method == 'GET' and \
+                    req.params.get('multipart-manifest') == 'get':
+                return self.handle_multipart_get(req, start_response)
 
         return self.app(env, start_response)
 
