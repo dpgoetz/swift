@@ -19,14 +19,10 @@ from xml.sax import saxutils
 from urllib import quote
 from cStringIO import StringIO
 from datetime import datetime
-try:
-    import simplejson as json
-except ImportError:
-    import json
 from swift.common.swob import Request, HTTPBadRequest, HTTPNotAcceptable, \
-    catch_http_exception
+    HTTPServerError, catch_http_exception
 from swift.common.wsgi import WSGIContext
-from swift.common.utils import split_path, TRUE_VALUES
+from swift.common.utils import split_path, TRUE_VALUES, json
 from swift.common.middleware.bulk import get_response_body, \
     ACCEPTABLE_FORMATS, Bulk
 
@@ -34,20 +30,30 @@ from swift.common.middleware.bulk import get_response_body, \
 def format_manifest(data, data_format):
     """
     Builds manifest response body out of data in given data_format
+    :raises KeyError if manifest file is invalid
     """
     if data_format == 'xml':
         output = \
             '<?xml version="1.0" encoding="UTF-8"?>\n<static_large_object>\n'
         for data_dict in data:
-            for key in sorted(data_dict.keys()):
-                output += '<%s>%s</%s>\n' % (
-                    key, saxutils.escape(str(data_dict[key])), key)
+            output += '<object_segment>\n'
+            for data_key, tag in [('name', 'path'),
+                                  ('hash', 'etag'),
+                                  ('bytes', 'size_bytes')]:
+                output += \
+                    '<%s>%s</%s>\n' % (
+                    tag, saxutils.escape(str(data_dict[data_key])), tag)
+            output += '</object_segment>\n'
         output += '</static_large_object>\n'
         return output
 
-    return json.dumps([{'path': o['name'],
-                        'etag': o['hash'],
-                        'size_bytes': o['bytes']} for o in data])
+    elif data_format == 'json':
+        return json.dumps([{'path': o['name'],
+                            'etag': o['hash'],
+                            'size_bytes': o['bytes']} for o in data])
+    else:
+        raise HTTPBadRequest("Invalid manifest format, accepts "
+                             "query parameter format=json or format=xml")
 
 
 def parse_input(raw_data, data_format):
@@ -216,7 +222,11 @@ class StaticLargeObject(object):
         if get_man_resp.status_int // 100 == 2:
             outgoing_format = req.params.get('format', 'json')
             manifest_data = json.loads(get_man_resp.body)
-            get_man_resp.body = format_manifest(manifest_data, outgoing_format)
+            try:
+                get_man_resp.body = format_manifest(manifest_data,
+                                                    outgoing_format)
+            except KeyError:
+                raise HTTPServerError("Invalid SLO manifest file")
 
         return get_man_resp(req.environ, start_response)
 
