@@ -37,6 +37,7 @@ test_xml_data = '''<?xml version="1.0" encoding="UTF-8"?>
 </static_large_object>
 '''
 
+
 class TestUntar(unittest.TestCase):
 
     def setUp(self):
@@ -52,7 +53,7 @@ class TestUntar(unittest.TestCase):
                       'content_type': 'testtype',
                       'bytes': 100}]
         self.assertEquals(test_xml_data, slo.format_manifest(data_dict, 'xml'))
-        self.assert_('content_type' not in \
+        self.assert_('content_type' not in
                      json.loads(slo.format_manifest(data_dict, 'json'))[0])
         self.assertEquals(
             '/cont/object',
@@ -76,12 +77,16 @@ class TestUntar(unittest.TestCase):
             test_xml_data.replace('object_segment', 'object_'),
             'xml')
         data = json.dumps(
-           [{'path': '/cont/object', 'etag': 'etagoftheobjecitsegment',
-             'size_bytes': 100}])
+            [{'path': '/cont/object', 'etag': 'etagoftheobjecitsegment',
+              'size_bytes': 100}])
         self.assertEquals('/cont/object',
                           slo.parse_input(data, 'json')[0]['path'])
 
         bad_data = json.dumps([{'path': '/cont/object', 'size_bytes': 100}])
         self.assertRaises(HTTPException, slo.parse_input, bad_data, 'json')
+
+    def test_put_manifest(self):
+        pass
+
 if __name__ == '__main__':
     unittest.main()
