@@ -180,7 +180,7 @@ class Bulk(object):
                     self.max_deletes_per_request)
             if '\n' in line:
                 obj_to_delete, line = line.split('\n', 1)
-                objs_to_delete.append(obj_to_delete)
+                objs_to_delete.append(unquote(obj_to_delete))
             else:
                 data = req.body_file.read(MAX_PATH_LENGTH)
                 if data:
@@ -188,13 +188,13 @@ class Bulk(object):
                 else:
                     data_remaining = False
                     if line.strip():
-                        objs_to_delete.append(line)
+                        objs_to_delete.append(unquote(line))
             if len(line) > MAX_PATH_LENGTH * 2:
                 raise HTTPBadRequest('Invalid File Name')
         return objs_to_delete
 
 
-    def handle_delete(self, req):
+    def handle_delete(self, req, objs_to_delete=None, user_agent='BulkDelete'):
         """
         :params req: a swob Request
         :raises HTTPException: on unhandled errors
@@ -213,7 +213,8 @@ class Bulk(object):
         if not out_content_type:
             return HTTPNotAcceptable(request=req)
 
-        objs_to_delete = self.get_objs_to_delete(req)
+        if objs_to_delete is None:
+            objs_to_delete = self.get_objs_to_delete(req)
         failed_files = []
         success_count = not_found_count = 0
         failed_file_response_type = HTTPBadRequest
@@ -221,7 +222,6 @@ class Bulk(object):
             obj_to_delete = obj_to_delete.strip().lstrip('/')
             if not obj_to_delete:
                 continue
-            obj_to_delete = unquote(obj_to_delete)
             delete_path = '/'.join(['', vrs, account, obj_to_delete])
             if not check_utf8(delete_path):
                 failed_files.append([quote(delete_path),
@@ -232,7 +232,7 @@ class Bulk(object):
             del(new_env['wsgi.input'])
             new_env['CONTENT_LENGTH'] = 0
             new_env['HTTP_USER_AGENT'] = \
-                '%s BulkDelete' % req.environ.get('HTTP_USER_AGENT')
+                '%s %s' % (req.environ.get('HTTP_USER_AGENT'), user_agent)
             delete_obj_req = Request.blank(delete_path, new_env)
             resp = delete_obj_req.get_response(self.app)
             if resp.status_int // 100 == 2:

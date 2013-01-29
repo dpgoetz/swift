@@ -56,7 +56,6 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPServerError, HTTPServiceUnavailable, Request, Response, \
     HTTPClientDisconnect, HTTPOk
 
-from swift.common.middleware.slo import parse_input # move to utils if keep this
 
 def copy_headers_into(from_r, to_r):
     """
@@ -357,11 +356,13 @@ class ObjectController(Controller):
         if config_true_value(resp.headers.get('x-static-large-object')):
             if ';' in resp.headers.get('content-type', ''):
                 # strip off slo_size from content_length
-                resp.content_type, slo_size = \
+                content_type, slo_size = \
                     resp.headers['content-type'].rsplit(';', 1)
+                if slo_size.startswith('slo_size'):
+                    resp.content_type = content_type
             large_object = True
             listing_page1 = ()
-            lcontainer = None  # container name is included
+            lcontainer = None  # container name is included in listing
             if resp.status_int == HTTPOk and \
                     req.method == 'GET' and not req.range:
                 listing = json.loads(resp.body)
@@ -375,7 +376,11 @@ class ObjectController(Controller):
                     new_req, _('Object'), partition,
                     self.iter_nodes(partition, nodes, self.app.object_ring),
                     req.path_info, len(nodes))
-                listing = json.loads(new_resp.body)
+                if new_resp.status_int // 100 == 2:
+                    listing = json.loads(new_resp.body)
+                else:
+                    return HTTPServiceUnavailable(
+                        "Unable to load SLO manifest", request=req)
 
         if 'x-object-manifest' in resp.headers:
             large_object = True

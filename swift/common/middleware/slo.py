@@ -26,7 +26,8 @@ from swift.common.swob import Request, HTTPBadRequest, HTTPNotAcceptable, \
     catch_http_exception
 from swift.common.wsgi import WSGIContext
 from swift.common.utils import split_path, TRUE_VALUES
-from swift.common.middleware.bulk import get_response_body, ACCEPTABLE_FORMATS
+from swift.common.middleware.bulk import get_response_body, \
+    ACCEPTABLE_FORMATS, Bulk
 
 
 def parse_input(raw_data, data_format):
@@ -63,59 +64,6 @@ def parse_input(raw_data, data_format):
     return parsed_data
 
 
-class _StaticLargeObjectContext(WSGIContext):
-    """
-    WSGI Context used by StaticLargeObject to wrap every GET request. If the
-    object being returned is a StaticLargeObject manifest will override the
-    reponse and return the concatenated segments specified in the manifest.
-    """
-
-    def __init__(self, slo, env):
-        WSGIContext.__init__(self, slo.app)
-        self.app = slo.app
-
-    def override_headers(self, resp):
-        """
-        Overrides headers
-        """
-        cur_resp_status = int(self._response_status.split(' ', 1)[0])
-        if cur_resp_status != 200:
-            return None
-        content_type = resp.headers.get('Content-Type', '')
-        content_length = None
-        if ';' in content_type:
-            content_type, slo_size = content_type.rsplit(';', 1)
-            if slo_size.startswith('slo_size='):
-                slo_size = slo_size[len('slo_size='):]
-                if not isdigit(slo_size):
-                    raise HTTPInternalServerError(
-                        'Invalid SLO Manifest Content-Type')
-                content_length = int(slo_size)
-        if content_length is None:
-            raise HTTPInternalServerError('Invalid SLO Manifest Content-Type')
-        resp.headers['Content-Type'] = content_type
-        resp.content_length = content_length
-        return resp
-
-    def slo_wrap_get_head(self, env, start_response):
-        """
-        Checks to see whether this is a Static Large Object. If so, overrides
-        the response.
-        """
-        app_resp = self._app_call(env)
-        if app_resp.headers.get('X-Static-Large-Object', '').lower() in \
-                ['json', 'xml']:
-            if env.method == 'HEAD':
-                head_resp = self.override_headers(app_resp)
-                if head_resp:
-                    return head_resp(env, start_response)
-            elif env.method == 'GET':
-                return self.slo_get(env, app_resp)
-        start_response(self._response_status,
-                       self._response_headers,
-                       self._response_exc_info)
-        return app_resp
-
 class StaticLargeObject(object):
 
     def __init__(self, app, conf):
@@ -125,8 +73,10 @@ class StaticLargeObject(object):
                                          1000))
         self.max_manifest_size = int(self.conf.get('max_manifest_size',
                                      1024*1024*2))
+        self.bulk_deleter = Bulk(
+            app, {'max_deletes_per_request': self.max_manifest_segments})
 
-    def handle_multipart_put(self, req, env, start_response, vrs, account):
+    def handle_multipart_put(self, req, start_response, vrs, account):
         """
         Will handle the PUT of a SLO manifest.
         Heads every object in manifest to check if is valid and if so will
@@ -178,25 +128,14 @@ class StaticLargeObject(object):
                     # shouldn't happen
                     last_modified = datetime.now()
 
-
-
-                from time import mktime
-                created_at = datetime.utcfromtimestamp(
-                    float(mktime(last_modified.timetuple()))).isoformat()
-                # python isoformat() doesn't include msecs when zero
-                if len(created_at) < len("1970-01-01T00:00:00.000000"):
-                    created_at += ".000000"
-
-
-                last_modified = last_modified.isoformat()
-                if len(last_modified) < len("1970-01-01T00:00:00.000000"):
-                        last_modified += ".000000"
+                last_modified_formatted = \
+                    last_modified.strftime('%Y-%m-%dT%H:%M:%S.%f')
                 data_for_storage.append(
                     {'name': seg_dict['path'].lstrip('/'),
                      'bytes': seg_size,
                      'hash': seg_dict['etag'],
                      'content_type': head_seg_resp.content_type,
-                     'last_modified': created_at})
+                     'last_modified': last_modified_formatted})
 
             else:
                 problem_segments.append([quote(obj_path),
@@ -205,6 +144,7 @@ class StaticLargeObject(object):
             resp_body = get_response_body(
                 out_content_type, {}, problem_segments)
             raise HTTPBadRequest(resp_body, content_type=out_content_type)
+        env = req.environ
         env['CONTENT_TYPE'] = \
             env.get('CONTENT_TYPE', '') + ";slo_size=%d" % total_size
         env['swift.extra_allowed_headers'] = \
@@ -215,6 +155,32 @@ class StaticLargeObject(object):
         env['CONTENT_LENGTH'] = len(json_data)
         env['wsgi.input'] = StringIO(json_data)
         return self.app(env, start_response)
+
+    def handle_multipart_delete(self, req, start_response):
+        """
+        Will delete all the segments in the SLO manifest and then, if
+        successful, will delete the manifest file.
+        """
+        new_env = req.environ.copy()
+        new_env['REQUEST_METHOD'] = 'GET'
+        del(new_env['wsgi.input'])
+        del(new_env['QUERY_STRING'])
+        new_env['CONTENT_LENGTH'] = 0
+        new_env['HTTP_USER_AGENT'] = \
+            '%s MultipartGET' % req.environ.get('HTTP_USER_AGENT')
+        get_man_resp = \
+            Request.blank('', new_env).get_response(self.app)
+        if get_man_resp.status_int // 100 == 2:
+            manifest = json.loads(get_man_resp.body)
+            delete_resp = self.bulk_deleter.handle_delete(
+                req, objs_to_delete=[o['name'] for o in manifest]),
+                user_agent='MultipartDELETE')
+            if delete_resp.status_int // 100 == 2:
+                return self.app(req.environ, start_response)
+            else:
+                return delete_resp
+        return get_man_resp
+
 
     @catch_http_exception
     def __call__(self, env, start_response):
@@ -229,14 +195,12 @@ class StaticLargeObject(object):
         if obj:
             if req.method == 'PUT' and \
                     req.params.get('multipart-manifest') == 'put':
-                return self.handle_multipart_put(req, env, start_response,
+                return self.handle_multipart_put(req, start_response,
                                                  vrs, account)
             if req.method == 'DELETE' and \
                     req.params.get('multipart-manifest') == 'delete':
-                return self.handle_multipart_delete(req, vrs, account)
-#            if env['REQUEST_METHOD']  == 'HEAD':
-#                context = _StaticLargeObjectContext(self, env)
-#                return context.slo_wrap_get_head(env, start_response)
+                return self.handle_multipart_delete(req, start_response)
+
         return self.app(env, start_response)
 
 
