@@ -366,6 +366,11 @@ class ContainerController(object):
             return HTTPNotAcceptable(request=req)
         container_list = broker.list_objects_iter(limit, marker, end_marker,
                                                   prefix, delimiter, path)
+
+        def munge_content_type(content_type, size):
+            if ';' in content_type:
+                user_content_type, slo_size = content_type.rsplit(';', 1)
+                if slo_size.startswith('slo_size=')
         if out_content_type == 'application/json':
             data = []
             for (name, created_at, size, content_type, etag) in container_list:

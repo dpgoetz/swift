@@ -20,9 +20,10 @@ from urllib import quote
 from cStringIO import StringIO
 from datetime import datetime
 from swift.common.swob import Request, HTTPBadRequest, HTTPNotAcceptable, \
-    HTTPServerError, HTTPRequestEntityTooLarge, catch_http_exception
+    HTTPServerError, HTTPRequestEntityTooLarge, wsgify
 from swift.common.wsgi import WSGIContext
 from swift.common.utils import split_path, TRUE_VALUES, json
+from swift.common.constraints import check_metadata
 from swift.common.middleware.bulk import get_response_body, \
     ACCEPTABLE_FORMATS, Bulk
 
@@ -102,11 +103,12 @@ class StaticLargeObject(object):
         self.bulk_deleter = Bulk(
             app, {'max_deletes_per_request': self.max_manifest_segments})
 
-    def handle_multipart_put(self, req, start_response, vrs, account):
+    def handle_multipart_put(self, req):
         """
         Will handle the PUT of a SLO manifest.
         Heads every object in manifest to check if is valid and if so will
         allow the request to proceed normally with some modified headers.
+        :params req: a swob.Request with an obj in path
         """
         if req.content_length > self.max_manifest_size:
             raise HTTPRequestEntityTooLarge(
@@ -117,9 +119,12 @@ class StaticLargeObject(object):
         problem_segments = []
 
         if len(parsed_data) > self.max_manifest_segments:
-            raise HTTPBadRequest(
+            raise HTTPRequestEntityTooLarge(
                 'Number segments must be <= %d' % self.max_manifest_segments)
-
+        try:
+            vrs, account, container, obj = req.split_path(1, 4, True)
+        except ValueError:
+            return self.app
         total_size = 0
         out_content_type = req.accept.best_match(ACCEPTABLE_FORMATS)
         if not out_content_type:
@@ -147,6 +152,7 @@ class StaticLargeObject(object):
                 if seg_size != head_seg_resp.content_length:
                     problem_segments.append([quote(obj_path), 'Size Mismatch'])
                 if seg_dict['etag'] != head_seg_resp.etag:
+                    print "%s != %s" % (seg_dict['etag'], head_seg_resp.etag)
                     problem_segments.append([quote(obj_path), 'Etag Mismatch'])
                 if head_seg_resp.last_modified:
                     last_modified = head_seg_resp.last_modified
@@ -169,11 +175,12 @@ class StaticLargeObject(object):
         if problem_segments:
             resp_body = get_response_body(
                 out_content_type, {}, problem_segments)
+            print resp_body
             raise HTTPBadRequest(resp_body, content_type=out_content_type)
         env = req.environ
         env['CONTENT_TYPE'] = \
-            env.get('CONTENT_TYPE', '') + ";slo_size=%d" % total_size
-        # TODO: prob don't need this
+            env.get('CONTENT_TYPE', '') + ";swift_bytes=%d" % total_size
+        # TODO: should I do this or just hard code X-Static-Large-Object ?
         env['swift.extra_allowed_headers'] = \
             env.get('swift.extra_allowed_headers',
                     []).append('X-Static-Large-Object')
@@ -181,7 +188,7 @@ class StaticLargeObject(object):
         json_data = json.dumps(data_for_storage)
         env['CONTENT_LENGTH'] = len(json_data)
         env['wsgi.input'] = StringIO(json_data)
-        return self.app(env, start_response)
+        return self.app
 
     def handle_multipart_delete(self, req, start_response):
         """
@@ -204,9 +211,9 @@ class StaticLargeObject(object):
                 user_agent='MultipartDELETE')
             if delete_resp.status_int // 100 == 2:
                 # delete the manifest file itself
-                return self.app(req.environ, start_response)
+                return self.app
             else:
-                return delete_resp  # TODO: this doesn't work need wsgify
+                return delete_resp
         return get_man_resp
 
     def handle_multipart_get(self, req, start_response):
@@ -227,34 +234,61 @@ class StaticLargeObject(object):
                                                     outgoing_format)
             except KeyError:
                 raise HTTPServerError("Invalid SLO manifest file")
+        return get_man_resp
 
-        return get_man_resp(req.environ, start_response)
+    def validate_content_type(self, req):
+        """
+        Because swift stores the Content-Type of each object both as metadata
+        on the object and in the container listings it is a convenient place
+        to store extra admin-only / user-invisible metadata.
 
-    @catch_http_exception
-    def __call__(self, env, start_response):
+        This metadata will take the form of an extra parameter appended to the
+        end of the customer's Content Type and will identified by the format:
+
+        swift_[key]=value
+
+        This also means that user Content-Type parameters can not begin with
+        swift_* .  This function verifies this. When more features begin to
+        use this type of metadata this function should be expanded into its own
+        middleware that will be towards the beginning of the proxy pipeline.
+        """
+        bad_req = check_metadata(req, 'object')
+        if bad_req:
+            return bad_req
+        content_type = req.headers.get('content-type')
+        if ';' in content_type:
+            for param in content_type.split(';')[1:]:
+                if param.lstrip().startswith('swift_'):
+                    return HTTPBadRequest(
+                        "Invalid Content-Type, "
+                        "swift_* is not a valid parameter name")
+        return self.app
+
+
+    @wsgify
+    def __call__(self, req):
         """
         WSGI entry point
         """
-        req = Request(env)
         try:
-            #TODO: the swob split path
-            vrs, account, container, obj = split_path(req.path, 1, 4, True)
+            vrs, account, container, obj = req.split_path(1, 4, True)
         except ValueError:
-            return self.app(env, start_response)
+            return self.app
         if obj:
+            if req.method == 'PUT':
+                return self.validate_content_type(req)
             if req.method == 'PUT' and \
                     req.params.get('multipart-manifest') == 'put':
-                return self.handle_multipart_put(req, start_response,
-                                                 vrs, account)
+                return self.handle_multipart_put(req)
             if req.method == 'DELETE' and \
                     req.params.get('multipart-manifest') == 'delete':
-                return self.handle_multipart_delete(req, start_response)
+                return self.handle_multipart_delete(req)
 
             if req.method == 'GET' and \
                     req.params.get('multipart-manifest') == 'get':
-                return self.handle_multipart_get(req, start_response)
+                return self.handle_multipart_get(req)
 
-        return self.app(env, start_response)
+        return self.app
 
 
 def filter_factory(global_conf, **local_conf):
@@ -314,7 +348,7 @@ def filter_factory(global_conf, **local_conf):
     If any of the object are below a minimum size (1 megabyte by default) If
     everything matches the manifest will be sent to object servers as is with
     an extra "X-Static-Large_object: True" header and a modified Content-Type.
-    The parameter: slo_size=total_size will be appended to the Content-Type,
+    The parameter: swift_size=total_size will be appended to the Content-Type,
     where total_size is the sum of all the included object_size_bytes. This
     extra parameter will be hidden from the user.
 
@@ -329,7 +363,7 @@ def filter_factory(global_conf, **local_conf):
     Content-Length: the total_size from the manifest (the sum of the sizes of
                     the segments)
     Content-Type: the original Content-Type given by the user (without
-                  slo_size)
+                  swift_size)
     X-Static-Large-Object: True
     Etag: the etag of the manifest object (different than DLO)
 

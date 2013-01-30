@@ -43,6 +43,8 @@ MAX_META_VALUE_LENGTH = constraints_conf_int('max_meta_value_length', 256)
 MAX_META_COUNT = constraints_conf_int('max_meta_count', 90)
 #: Max overall size of metadata
 MAX_META_OVERALL_SIZE = constraints_conf_int('max_meta_overall_size', 4096)
+#: Max size of any header
+MAX_HEADER_SIZE = constraints_conf_int('max_meta_overall_size', 8192)
 #: Max object name length
 MAX_OBJECT_NAME_LENGTH = constraints_conf_int('max_object_name_length', 1024)
 #: Max object list length of a get request for a container
@@ -76,6 +78,8 @@ def check_metadata(req, target_type):
     meta_size = 0
     for key, value in req.headers.iteritems():
         if not key.lower().startswith(prefix):
+            if len(value) > MAX_HEADER_SIZE:
+                return HTTPBadRequest('Header Line Too Long')
             continue
         key = key[len(prefix):]
         if not key:

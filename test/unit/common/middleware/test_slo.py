@@ -14,9 +14,11 @@
 # limitations under the License.
 
 import unittest
+from mock import patch
 from swift.common.middleware import slo
 from swift.common.utils import json
-from swift.common.swob import Request, HTTPException, HTTPRequestEntityTooLarge
+from swift.common.swob import Request, Response, HTTPException, \
+    HTTPRequestEntityTooLarge
 
 
 class FakeApp(object):
@@ -25,13 +27,18 @@ class FakeApp(object):
 
     def __call__(self, env, start_response):
         self.calls += 1
+        if env['PATH_INFO'].startswith('/test_good/'):
+            return Response(
+                status=200,
+                headers={'etag': 'etagoftheobjectsegment',
+                         'Content-Length': 100})(env, start_response)
 
 
 test_xml_data = '''<?xml version="1.0" encoding="UTF-8"?>
 <static_large_object>
 <object_segment>
 <path>/cont/object</path>
-<etag>etagoftheobjecitsegment</etag>
+<etag>etagoftheobjectsegment</etag>
 <size_bytes>100</size_bytes>
 </object_segment>
 </static_large_object>
@@ -49,7 +56,7 @@ class TestStaticLargeObject(unittest.TestCase):
 
     def test_format_manifest_xml(self):
         data_dict = [{'name': '/cont/object',
-                      'hash': 'etagoftheobjecitsegment',
+                      'hash': 'etagoftheobjectsegment',
                       'content_type': 'testtype',
                       'bytes': 100}]
         self.assertEquals(test_xml_data, slo.format_manifest(data_dict, 'xml'))
@@ -85,15 +92,32 @@ class TestStaticLargeObject(unittest.TestCase):
         bad_data = json.dumps([{'path': '/cont/object', 'size_bytes': 100}])
         self.assertRaises(HTTPException, slo.parse_input, bad_data, 'json')
 
+    def test_validate_content_type(self):
+        req = Request.blank(
+            '/v/a/c/o', headers={'Content-Type': 'text/html; swift_hey=there'})
+        self.assertEquals(self.slo.validate_content_type(req).status_int, 400)
+
     def test_put_manifest_too_big(self):
         req = Request.blank('/')
         req.content_length = self.slo.max_manifest_size + 1
         try:
-            self.slo.handle_multipart_put(req, None, 'v1', 'AUTH_test')
+            self.slo.handle_multipart_put(req)
         except HTTPException, e:
             self.assertEquals(e.status_int, 413)
 
-    def test_
+        with patch.object(self.slo, 'max_manifest_segments', 0):
+            req = Request.blank('/?format=xml', body=test_xml_data)
+            try:
+                self.slo.handle_multipart_put(req)
+            except HTTPException, e:
+                self.assertEquals(e.status_int, 413)
+
+    def test_handle_multipart_put_success(self):
+        req = Request.blank(
+            '/test_good/AUTH_test/c/man?multipart-manifest=put&format=xml',
+            environ={'REQUEST_METHOD': 'PUT'}, body=test_xml_data)
+        self.slo.handle_multipart_put(req)
+        self.assertEquals(req.headers['X-Static-Large-Object'], 'True')
 
 if __name__ == '__main__':
     unittest.main()
