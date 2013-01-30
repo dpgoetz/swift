@@ -20,7 +20,7 @@ from urllib import quote
 from cStringIO import StringIO
 from datetime import datetime
 from swift.common.swob import Request, HTTPBadRequest, HTTPNotAcceptable, \
-    HTTPServerError, catch_http_exception
+    HTTPServerError, HTTPRequestEntityTooLarge, catch_http_exception
 from swift.common.wsgi import WSGIContext
 from swift.common.utils import split_path, TRUE_VALUES, json
 from swift.common.middleware.bulk import get_response_body, \
@@ -109,7 +109,7 @@ class StaticLargeObject(object):
         allow the request to proceed normally with some modified headers.
         """
         if req.content_length > self.max_manifest_size:
-            raise HTTPBadRequest(
+            raise HTTPRequestEntityTooLarge(
                 "Manifest File > %d bytes" % self.max_manifest_size)
         raw_data = req.body_file.read(self.max_manifest_size)
         incoming_format = req.params.get('format')

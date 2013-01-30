@@ -16,7 +16,7 @@
 import unittest
 from swift.common.middleware import slo
 from swift.common.utils import json
-from swift.common.swob import HTTPException
+from swift.common.swob import Request, HTTPException, HTTPRequestEntityTooLarge
 
 
 class FakeApp(object):
@@ -38,7 +38,7 @@ test_xml_data = '''<?xml version="1.0" encoding="UTF-8"?>
 '''
 
 
-class TestUntar(unittest.TestCase):
+class TestStaticLargeObject(unittest.TestCase):
 
     def setUp(self):
         self.app = FakeApp()
@@ -85,8 +85,15 @@ class TestUntar(unittest.TestCase):
         bad_data = json.dumps([{'path': '/cont/object', 'size_bytes': 100}])
         self.assertRaises(HTTPException, slo.parse_input, bad_data, 'json')
 
-    def test_put_manifest(self):
-        pass
+    def test_put_manifest_too_big(self):
+        req = Request.blank('/')
+        req.content_length = self.slo.max_manifest_size + 1
+        try:
+            self.slo.handle_multipart_put(req, None, 'v1', 'AUTH_test')
+        except HTTPException, e:
+            self.assertEquals(e.status_int, 413)
+
+    def test_
 
 if __name__ == '__main__':
     unittest.main()
