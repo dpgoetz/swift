@@ -307,6 +307,21 @@ class ContainerController(object):
             return HTTPNotAcceptable(request=req)
         return HTTPNoContent(request=req, headers=headers, charset='utf-8')
 
+    def derive_content_type_metadata(self, content_type, size):
+        """
+        Will check the last parameter and if it starts with 'swift_' will
+        strip it off. Will return content_type without the last param and
+        a dict with {'key': 'value'} from that param.
+        This function only works for single swift_* params.
+        :returns: tuple: new_content_type, dict_of_mundged_data
+        """
+        if ';' in content_type:
+            new_content_type, param = content_type.rsplit(';', 1)
+            if param.lstrip().startswith('swift_bytes='):
+                key, value = param.split('=')
+                return new_content_type, int(value)
+        return content_type, size
+
     @public
     @timing_stats
     def GET(self, req):
@@ -367,10 +382,6 @@ class ContainerController(object):
         container_list = broker.list_objects_iter(limit, marker, end_marker,
                                                   prefix, delimiter, path)
 
-        def munge_content_type(content_type, size):
-            if ';' in content_type:
-                user_content_type, slo_size = content_type.rsplit(';', 1)
-                if slo_size.startswith('slo_size=')
         if out_content_type == 'application/json':
             data = []
             for (name, created_at, size, content_type, etag) in container_list:
@@ -382,6 +393,8 @@ class ContainerController(object):
                     # python isoformat() doesn't include msecs when zero
                     if len(created_at) < len("1970-01-01T00:00:00.000000"):
                         created_at += ".000000"
+                    content_type, size = self.derive_content_type_metadata(
+                        content_type, size)
                     data.append({'last_modified': created_at, 'bytes': size,
                                 'content_type': content_type, 'hash': etag,
                                 'name': name})
@@ -400,6 +413,8 @@ class ContainerController(object):
                     xml_output.append('<subdir name="%s"><name>%s</name>'
                                       '</subdir>' % (name, name))
                 else:
+                    content_type, size = self.derive_content_type_metadata(
+                        content_type, size)
                     content_type = saxutils.escape(content_type)
                     xml_output.append(
                         '<object><name>%s</name><hash>%s</hash>'

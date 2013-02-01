@@ -384,7 +384,8 @@ class ObjectController(Controller):
                     return HTTPServiceUnavailable(
                         "Unable to load SLO manifest", request=req)
 
-        if 'x-object-manifest' in resp.headers:
+        if 'x-object-manifest' in resp.headers and \
+            req.params.get('multipart-manifest') != 'get':
             large_object = True
             lcontainer, lprefix = \
                 resp.headers['x-object-manifest'].split('/', 1)
@@ -493,6 +494,11 @@ class ObjectController(Controller):
                                                self.object_name))
             req.headers['X-Fresh-Metadata'] = 'true'
             req.environ['swift_versioned_copy'] = True
+            #TODO: does this work and stuff?
+            if req.environ.get('QUERY_STRING'):
+                req.environ['QUERY_STRING'] += '&multipart-manifest=get'
+            else:
+                req.environ['QUERY_STRING'] = 'multipart-manifest=get'
             resp = self.PUT(req)
             # Older editions returned 202 Accepted on object POSTs, so we'll
             # convert any 201 Created responses to that for compatibility with

@@ -19,10 +19,11 @@ from xml.sax import saxutils
 from urllib import quote
 from cStringIO import StringIO
 from datetime import datetime
+import mimetypes
 from swift.common.swob import Request, HTTPBadRequest, HTTPNotAcceptable, \
-    HTTPServerError, HTTPRequestEntityTooLarge, wsgify
+    HTTPServerError, HTTPMethodNotAllowed, HTTPRequestEntityTooLarge, wsgify
 from swift.common.wsgi import WSGIContext
-from swift.common.utils import split_path, TRUE_VALUES, json
+from swift.common.utils import split_path, TRUE_VALUES, json, get_logger
 from swift.common.constraints import check_metadata
 from swift.common.middleware.bulk import get_response_body, \
     ACCEPTABLE_FORMATS, Bulk
@@ -31,7 +32,7 @@ from swift.common.middleware.bulk import get_response_body, \
 def format_manifest(data, data_format):
     """
     Builds manifest response body out of data in given data_format
-    :raises KeyError if manifest file is invalid
+    :raises KeyError or TypeError if manifest file is invalid
     """
     if data_format == 'xml':
         output = \
@@ -96,6 +97,7 @@ class StaticLargeObject(object):
     def __init__(self, app, conf):
         self.conf = conf
         self.app = app
+        self.logger = get_logger(conf, log_route='slo')
         self.max_manifest_segments = int(self.conf.get('max_manifest_segments',
                                          1000))
         self.max_manifest_size = int(self.conf.get('max_manifest_size',
@@ -113,6 +115,9 @@ class StaticLargeObject(object):
         if req.content_length > self.max_manifest_size:
             raise HTTPRequestEntityTooLarge(
                 "Manifest File > %d bytes" % self.max_manifest_size)
+        if req.headers.get('X-Copy-From'):
+            raise HTTPMethodNotAllowed(
+                'Multipart Manifest PUTs cannot be Copy requests')
         raw_data = req.body_file.read(self.max_manifest_size)
         incoming_format = req.params.get('format')
         parsed_data = parse_input(raw_data, incoming_format)
@@ -128,7 +133,7 @@ class StaticLargeObject(object):
         total_size = 0
         out_content_type = req.accept.best_match(ACCEPTABLE_FORMATS)
         if not out_content_type:
-            raise HTTPNotAcceptable(request=req)
+            out_content_type = 'text/plain'
         data_for_storage = []
         for seg_dict in parsed_data:
             obj_path = '/'.join(
@@ -152,7 +157,6 @@ class StaticLargeObject(object):
                 if seg_size != head_seg_resp.content_length:
                     problem_segments.append([quote(obj_path), 'Size Mismatch'])
                 if seg_dict['etag'] != head_seg_resp.etag:
-                    print "%s != %s" % (seg_dict['etag'], head_seg_resp.etag)
                     problem_segments.append([quote(obj_path), 'Etag Mismatch'])
                 if head_seg_resp.last_modified:
                     last_modified = head_seg_resp.last_modified
@@ -175,22 +179,25 @@ class StaticLargeObject(object):
         if problem_segments:
             resp_body = get_response_body(
                 out_content_type, {}, problem_segments)
-            print resp_body
             raise HTTPBadRequest(resp_body, content_type=out_content_type)
         env = req.environ
-        env['CONTENT_TYPE'] = \
-            env.get('CONTENT_TYPE', '') + ";swift_bytes=%d" % total_size
+
+        if not env.get('CONTENT_TYPE'):
+            guessed_type, _junk = mimetypes.guess_type(req.path_info)
+            env['CONTENT_TYPE'] = guessed_type or 'application/octet-stream'
+        env['CONTENT_TYPE'] += ";swift_bytes=%d" % total_size
+
         # TODO: should I do this or just hard code X-Static-Large-Object ?
         env['swift.extra_allowed_headers'] = \
             env.get('swift.extra_allowed_headers',
                     []).append('X-Static-Large-Object')
         env['HTTP_X_STATIC_LARGE_OBJECT'] = 'True'
         json_data = json.dumps(data_for_storage)
-        env['CONTENT_LENGTH'] = len(json_data)
+        env['CONTENT_LENGTH'] = str(len(json_data))
         env['wsgi.input'] = StringIO(json_data)
         return self.app
 
-    def handle_multipart_delete(self, req, start_response):
+    def handle_multipart_delete(self, req):
         """
         Will delete all the segments in the SLO manifest and then, if
         successful, will delete the manifest file.
@@ -201,7 +208,7 @@ class StaticLargeObject(object):
         new_env['QUERY_STRING'] = 'multipart-manifest=get'
         new_env['CONTENT_LENGTH'] = 0
         new_env['HTTP_USER_AGENT'] = \
-            '%s MultipartGET' % req.environ.get('HTTP_USER_AGENT')
+            '%s MultipartDELETE' % req.environ.get('HTTP_USER_AGENT')
         get_man_resp = \
             Request.blank('', new_env).get_response(self.app)
         if get_man_resp.status_int // 100 == 2:
@@ -216,7 +223,7 @@ class StaticLargeObject(object):
                 return delete_resp
         return get_man_resp
 
-    def handle_multipart_get(self, req, start_response):
+    def handle_multipart_get(self, req):
         """
         Will return a Response with the actual manifest itself.
         :param req: a swob.Request with query string ?multipart-manifest=get
@@ -228,11 +235,16 @@ class StaticLargeObject(object):
         get_man_resp = req.get_response(self.app)
         if get_man_resp.status_int // 100 == 2:
             outgoing_format = req.params.get('format', 'json')
-            manifest_data = json.loads(get_man_resp.body)
+            raw_data = get_man_resp.body
+            try:
+                manifest_data = json.loads(raw_data)
+            except Exception, e:
+                self.logger.exception("Invalid SLO manifest file")
+                raise HTTPServerError("Invalid SLO manifest file")
             try:
                 get_man_resp.body = format_manifest(manifest_data,
                                                     outgoing_format)
-            except KeyError:
+            except (KeyError, TypeError):
                 raise HTTPServerError("Invalid SLO manifest file")
         return get_man_resp
 
@@ -254,15 +266,14 @@ class StaticLargeObject(object):
         """
         bad_req = check_metadata(req, 'object')
         if bad_req:
-            return bad_req
+            raise bad_req
         content_type = req.headers.get('content-type')
-        if ';' in content_type:
+        if content_type and ';' in content_type:
             for param in content_type.split(';')[1:]:
                 if param.lstrip().startswith('swift_'):
-                    return HTTPBadRequest(
+                    raise HTTPBadRequest(
                         "Invalid Content-Type, "
                         "swift_* is not a valid parameter name")
-        return self.app
 
 
     @wsgify
@@ -276,7 +287,7 @@ class StaticLargeObject(object):
             return self.app
         if obj:
             if req.method == 'PUT':
-                return self.validate_content_type(req)
+                self.validate_content_type(req)
             if req.method == 'PUT' and \
                     req.params.get('multipart-manifest') == 'put':
                 return self.handle_multipart_put(req)
