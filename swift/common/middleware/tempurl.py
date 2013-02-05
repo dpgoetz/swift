@@ -86,7 +86,6 @@ from time import gmtime, strftime, time
 from urllib import quote, unquote
 from urlparse import parse_qs
 
-from swift.common.utils import get_logger
 from swift.common.wsgi import make_pre_authed_env
 from swift.common.http import HTTP_UNAUTHORIZED
 
@@ -161,8 +160,6 @@ class TempURL(object):
         self.app = app
         #: The filter configuration dict.
         self.conf = conf
-        #: The logger to use with this middleware.
-        self.logger = get_logger(conf, log_route='tempurl')
 
         headers = DEFAULT_INCOMING_REMOVE_HEADERS
         if 'incoming_remove_headers' in conf:
@@ -378,7 +375,6 @@ class TempURL(object):
         :param start_response: The WSGI start_response hook.
         :returns: 401 response as per WSGI.
         """
-        self._log_request(env, HTTP_UNAUTHORIZED)
         body = '401 Unauthorized: Temp URL invalid\n'
         start_response('401 Unauthorized',
                        [('Content-Type', 'text/plain'),
@@ -444,44 +440,6 @@ class TempURL(object):
                 del headers[h]
         return headers.items()
 
-    def _log_request(self, env, response_status_int):
-        """
-        Used when a request might not be logged by the underlying
-        WSGI application, but we'd still like to record what
-        happened. An early 401 Unauthorized is a good example of
-        this.
-
-        :param env: The WSGI environment for the request.
-        :param response_status_int: The HTTP status we'll be replying
-                                    to the request with.
-        """
-        the_request = quote(unquote(env.get('PATH_INFO') or '/'))
-        if env.get('QUERY_STRING'):
-            the_request = the_request + '?' + env['QUERY_STRING']
-        client = env.get('HTTP_X_CLUSTER_CLIENT_IP')
-        if not client and 'HTTP_X_FORWARDED_FOR' in env:
-            # remote host for other lbs
-            client = env['HTTP_X_FORWARDED_FOR'].split(',')[0].strip()
-        if not client:
-            client = env.get('REMOTE_ADDR')
-        self.logger.info(' '.join(quote(str(x)) for x in (
-            client or '-',
-            env.get('REMOTE_ADDR') or '-',
-            strftime('%d/%b/%Y/%H/%M/%S', gmtime()),
-            env.get('REQUEST_METHOD') or 'GET',
-            the_request,
-            env.get('SERVER_PROTOCOL') or '1.0',
-            response_status_int,
-            env.get('HTTP_REFERER') or '-',
-            (env.get('HTTP_USER_AGENT') or '-') + ' TempURL',
-            env.get('HTTP_X_AUTH_TOKEN') or '-',
-            '-',
-            '-',
-            '-',
-            env.get('swift.trans_id') or '-',
-            '-',
-            '-',
-        )))
 
 
 def filter_factory(global_conf, **local_conf):

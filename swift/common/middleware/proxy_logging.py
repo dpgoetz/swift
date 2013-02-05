@@ -89,6 +89,8 @@ class ProxyLoggingMiddleware(object):
         :param bytes_sent: bytes yielded to the WSGI server
         :param request_time: time taken to satisfy the request, in seconds
         """
+        if env.get('swift.proxy_access_log_made'):
+            return
         req = Request(env)
         if client_disconnect:  # log disconnected clients as '499' status code
             status_int = 499
@@ -122,6 +124,7 @@ class ProxyLoggingMiddleware(object):
                 '%.4f' % request_time,
                 req.environ.get('swift.source'),
             )))
+        env['swift.proxy_access_log_made'] = True
         # Log timing and bytes-transfered data to StatsD
         if req.path.startswith('/v1/'):
             try:
