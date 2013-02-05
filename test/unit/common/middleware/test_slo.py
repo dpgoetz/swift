@@ -17,6 +17,7 @@ import unittest
 from mock import patch
 from swift.common.middleware import slo
 from swift.common.utils import json
+from swift.common.constraints import MAX_META_VALUE_LENGTH
 from swift.common.swob import Request, Response, HTTPException, \
     HTTPRequestEntityTooLarge
 
@@ -31,6 +32,9 @@ class FakeApp(object):
         if env['PATH_INFO'] == '/':
             return Response(status=200, body='passed')(env, start_response)
         if env['PATH_INFO'].startswith('/test_good/'):
+            j, v, a, cont, obj = env['PATH_INFO'].split('/')
+            if obj == 'a_2':
+                return Response(status=400)(env, start_response)
             return Response(
                 status=200,
                 headers={'etag': 'etagoftheobjectsegment',
@@ -50,6 +54,20 @@ class FakeApp(object):
                 [{'name': '/c/a_1', 'hash': 'a', 'bytes': '1'},
                  {'name': '/d/b_2', 'hash': 'b', 'bytes': '2'},])
             return Response(status=200, body=good_data)(env, start_response)
+
+        if env['PATH_INFO'].startswith('/test_get_broke_json/'):
+            good_data = json.dumps(
+                [{'name': '/c/a_1', 'hash': 'a', 'bytes': '1'},
+                 {'name': '/d/b_2', 'hash': 'b', 'bytes': '2'},])
+            return Response(status=200,
+                            body=good_data[:-5])(env, start_response)
+
+        if env['PATH_INFO'].startswith('/test_get_bad_json/'):
+            bad_data = json.dumps(
+                [{'name': '/c/a_1', 'something': 'a', 'bytes': '1'},
+                 {'name': '/d/b_2', 'bytes': '2'},])
+            return Response(status=200,
+                            body=bad_data)(env, start_response)
 
         if env['PATH_INFO'].startswith('/test_delete_404/'):
             self.req_method_paths.append((env['REQUEST_METHOD'], env['PATH_INFO']))
@@ -144,6 +162,12 @@ class TestStaticLargeObject(unittest.TestCase):
             '/v/a/c/o', headers={'Content-Type': 'text/html; swift_hey=there'})
         self.assertRaises(HTTPException, self.slo.validate_content_type, req)
 
+    def test_validate_bad_meta(self):
+        req = Request.blank(
+            '/v/a/c/o',
+            headers={'x-object-meta-hello': 'ab' * MAX_META_VALUE_LENGTH})
+        self.assertRaises(HTTPException, self.slo.validate_content_type, req)
+
     def test_put_manifest_too_quick_fail(self):
         req = Request.blank('/')
         req.content_length = self.slo.max_manifest_size + 1
@@ -211,6 +235,7 @@ class TestStaticLargeObject(unittest.TestCase):
     def test_handle_multipart_put_check_data_bad(self):
         bad_data = json.dumps(
             [{'path': '/c/a_1', 'etag': 'a', 'size_bytes': '1'},
+             {'path': '/c/a_2', 'etag': 'a', 'size_bytes': '1'},
              {'path': '/d/b_2', 'etag': 'b', 'size_bytes': '2'},])
         req = Request.blank(
             '/test_good/A/c/man?multipart-manifest=put&format=json',
@@ -220,15 +245,35 @@ class TestStaticLargeObject(unittest.TestCase):
         try:
             self.slo.handle_multipart_put(req)
         except HTTPException, e:
-            self.assertEquals(self.app.calls, 2)
+            self.assertEquals(self.app.calls, 3)
             data = json.loads(e.body)
             errors = data['Errors']
             self.assertEquals(errors[0][0], '/test_good/A/c/a_1')
             self.assertEquals(errors[0][1], 'Size Mismatch')
+            self.assertEquals(errors[2][1], '400 Bad Request')
             self.assertEquals(errors[-1][0], '/test_good/A/d/b_2')
             self.assertEquals(errors[-1][1], 'Etag Mismatch')
         else:
             self.assert_(False)
+
+    def test_handle_multipart_get_range(self):
+        req = Request.blank(
+            '/test_get/A/c/man?multipart-manifest=get',
+            environ={'REQUEST_METHOD': 'GET'},
+            headers={'Range': 'bytes=2-5'})
+        resp = self.slo.handle_multipart_get(req)
+        self.assertEquals(self.app.calls, 0)
+        self.assertEquals(resp.status_int, 400)
+
+        req = Request.blank(
+            '/test_get_broke_json/A/c/man?multipart-manifest=get',
+            environ={'REQUEST_METHOD': 'GET'})
+        self.assertRaises(HTTPException, self.slo.handle_multipart_get, req)
+
+        req = Request.blank(
+            '/test_get_bad_json/A/c/man?multipart-manifest=get',
+            environ={'REQUEST_METHOD': 'GET'})
+        self.assertRaises(HTTPException, self.slo.handle_multipart_get, req)
 
     def test_handle_multipart_get_json(self):
         good_data = json.dumps(

@@ -48,13 +48,13 @@ from swift.common.exceptions import ChunkReadTimeout, \
 from swift.common.http import is_success, is_client_error, HTTP_CONTINUE, \
     HTTP_CREATED, HTTP_MULTIPLE_CHOICES, HTTP_NOT_FOUND, \
     HTTP_INTERNAL_SERVER_ERROR, HTTP_SERVICE_UNAVAILABLE, \
-    HTTP_INSUFFICIENT_STORAGE
+    HTTP_INSUFFICIENT_STORAGE, HTTP_OK
 from swift.proxy.controllers.base import Controller, delay_denial, \
     cors_validation
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPRequestTimeout, \
     HTTPServerError, HTTPServiceUnavailable, Request, Response, \
-    HTTPClientDisconnect, HTTPOk
+    HTTPClientDisconnect
 
 
 def copy_headers_into(from_r, to_r):
@@ -357,17 +357,20 @@ class ObjectController(Controller):
         if config_true_value(resp.headers.get('x-static-large-object')) and \
             req.params.get('multipart-manifest') != 'get':
             if ';' in resp.headers.get('content-type', ''):
-                # strip off slo_size from content_length
-                content_type, slo_size = \
+                # strip off swift_size from content_length
+                content_type, swift_size = \
                     resp.headers['content-type'].rsplit(';', 1)
-                if slo_size.startswith('slo_size'):
+                if swift_size.lstrip().startswith('swift_size'):
                     resp.content_type = content_type
             large_object = True
             listing_page1 = ()
             lcontainer = None  # container name is included in listing
-            if resp.status_int == HTTPOk and \
+            if resp.status_int == HTTP_OK and \
                     req.method == 'GET' and not req.range:
-                listing = json.loads(resp.body)
+                try:
+                    listing = json.loads(resp.body)
+                except ValueError:
+                    listing = []
             else:
                 # need to make a second request to get whole manifest
                 new_req = req.copy_get()
@@ -379,7 +382,10 @@ class ObjectController(Controller):
                     self.iter_nodes(partition, nodes, self.app.object_ring),
                     req.path_info, len(nodes))
                 if new_resp.status_int // 100 == 2:
-                    listing = json.loads(new_resp.body)
+                    try:
+                        listing = json.loads(new_resp.body)
+                    except ValueError:
+                        listing = []
                 else:
                     return HTTPServiceUnavailable(
                         "Unable to load SLO manifest", request=req)

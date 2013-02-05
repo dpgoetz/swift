@@ -266,6 +266,7 @@ class StaticLargeObject(object):
         """
         bad_req = check_metadata(req, 'object')
         if bad_req:
+            #TODO: this doesn't go through proxy logging...
             raise bad_req
         content_type = req.headers.get('content-type')
         if content_type and ';' in content_type:

@@ -78,7 +78,7 @@ def check_metadata(req, target_type):
     meta_size = 0
     for key, value in req.headers.iteritems():
         if not key.lower().startswith(prefix):
-            if len(value) > MAX_HEADER_SIZE:
+            if isinstance(value, basestring) and len(value) > MAX_HEADER_SIZE:
                 return HTTPBadRequest('Header Line Too Long')
             continue
         key = key[len(prefix):]
