@@ -104,6 +104,7 @@ setup(
             'filter_factory',
             'proxy_logging=swift.common.middleware.proxy_logging:'
             'filter_factory',
+            'slo=swift.common.middleware.slo:filter_factory',
         ],
     },
 )

@@ -108,6 +108,8 @@ class Application(object):
             a.strip()
             for a in conf.get('cors_allow_origin', '').split(',')
             if a.strip()]
+        self.allow_static_large_object = config_true_value(
+            conf.get('allow_static_large_object', 'true'))
 
     def get_controller(self, path):
         """
