@@ -20,7 +20,7 @@ from time import time
 from swift.common.swob import Request, HTTPBadGateway, HTTPAccepted, \
     HTTPCreated, HTTPBadRequest, HTTPNotFound, HTTPUnauthorized, HTTPOk, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPNotAcceptable, \
-    HTTPLengthRequired
+    HTTPLengthRequired, HTTPException
 from swift.common.utils import json
 from swift.common.constraints import check_utf8, MAX_FILE_SIZE
 from swift.common.http import HTTP_BAD_REQUEST, HTTP_UNAUTHORIZED, \
@@ -78,39 +78,13 @@ def get_response_body(data_format, data_dict, error_list):
     raise HTTPNotAcceptable('Invalid output type')
 
 
-class BulkIterable(object):
-    """
-    Iterable that will return whitespace occasionally to client to keep
-    connection alive. Once the underlying request has been completed it
-    can be set with request_complete, the data will be sent off and a
-    StopIteration will be raised
-    """
-
-    def __init__(self):
-        self.yield_frequency = 60
-        self.response_body = ''
-
-    def __iter__(self):
-        return self
-
-    def next(self):
-        """
-        Standard iterator function that return empty spaces and finally the
-        response body.
-        """
-        last_yield = time()
-        while True:
-            if last_yield + self.yield_frequency < time():
-                yield ' '
-            if self.response_body:
-                yield '\r\n\r\n' + self.response_body
-                raise StopIteration('Bulk Request Processed')
-           self.handle_request()
-
-class ExpandArchiveIterable(BulkIterable):
+class ExpandArchive(object):
 
     def __init__(self, app, conf, req, archive_type):
-        BulkIterable.__init__(self)
+        """
+        :params archive_type: specifying the compression type of the tar.
+                               Accepts '', 'gz, or 'bz2'
+        """
         self.app = app
         self.max_containers = int(
             conf.get('max_containers_per_extraction', 10000))
@@ -118,15 +92,32 @@ class ExpandArchiveIterable(BulkIterable):
             conf.get('max_failed_extractions', 1000))
         self.req = req
         self.archive_type = archive_type
+        self.yield_frequency = int(conf.get('yield_frequency', 1))
 
-    def create_container(self, req, container_path):
+        if req.content_length is None and \
+                req.headers.get('transfer-encoding', '').lower() != 'chunked':
+            raise HTTPLengthRequired(request=req)
+
+        self.out_content_type = req.accept.best_match(ACCEPTABLE_FORMATS)
+        if not self.out_content_type:
+            raise HTTPNotAcceptable(request=req)
+
+        try:
+            self.vrs, self.account, extract_base = req.split_path(2, 3, True)
+        except ValueError:
+            raise HTTPNotFound(request=req)
+        extract_base = extract_base or ''
+        self.extract_base = extract_base.rstrip('/')
+
+    def create_container(self, container):
         """
         Makes a subrequest to create a new container.
         :params container_path: an unquoted path to a container to be created
         :returns: None on success
         :raises: CreateContainerError on creation error
         """
-        new_env = req.environ.copy()
+        container_path = '/'.join(['', self.vrs, self.account, container])
+        new_env = self.req.environ.copy()
         new_env['PATH_INFO'] = container_path
         new_env['swift.source'] = 'EA'
         create_cont_req = Request.blank(container_path, environ=new_env)
@@ -136,33 +127,23 @@ class ExpandArchiveIterable(BulkIterable):
                 "Create Container Failed: " + container_path,
                 resp.status_int, resp.status)
 
-    def handle_request(self, req, compress_type):
+    def handle_request_iter(self):
         """
-        :params req: a swob Request
-        :params compress_type: specifying the compression type of the tar.
-                               Accepts '', 'gz, or 'bz2'
         :raises HTTPException: on unhandled errors
         :returns: a swob response to request
         """
         success_count = 0
         failed_files = []
         existing_containers = set()
-        out_content_type = req.accept.best_match(ACCEPTABLE_FORMATS)
-        if not out_content_type:
-            return HTTPNotAcceptable(request=req)
-        if req.content_length is None and \
-                req.headers.get('transfer-encoding', '').lower() != 'chunked':
-            return HTTPLengthRequired(request=req)
+        last_yield = time()
+        separator = ''
         try:
-            vrs, account, extract_base = req.split_path(2, 3, True)
-        except ValueError:
-            return HTTPNotFound(request=req)
-        extract_base = extract_base or ''
-        extract_base = extract_base.rstrip('/')
-        try:
-            tar = tarfile.open(mode='r|' + compress_type,
-                               fileobj=req.body_file)
+            tar = tarfile.open(mode='r|' + self.archive_type,
+                               fileobj=self.req.body_file)
             while True:
+                if last_yield + self.yield_frequency < time():
+                    separator = '\r\n\r\n'
+                    yield ' '
                 tar_info = tar.next()
                 if tar_info is None or \
                         len(failed_files) >= self.max_failed_extractions:
@@ -172,13 +153,13 @@ class ExpandArchiveIterable(BulkIterable):
                     if obj_path.startswith('./'):
                         obj_path = obj_path[2:]
                     obj_path = obj_path.lstrip('/')
-                    if extract_base:
-                        obj_path = extract_base + '/' + obj_path
+                    if self.extract_base:
+                        obj_path = self.extract_base + '/' + obj_path
                     if '/' not in obj_path:
                         continue  # ignore base level file
 
                     destination = '/'.join(
-                        ['', vrs, account, obj_path])
+                        ['', self.vrs, self.account, obj_path])
                     container = obj_path.split('/', 1)[0]
                     if not check_utf8(destination):
                         failed_files.append(
@@ -192,12 +173,12 @@ class ExpandArchiveIterable(BulkIterable):
                         continue
                     if container not in existing_containers:
                         try:
-                            self.create_container(
-                                req, '/'.join(['', vrs, account, container]))
+                            self.create_container(container)
                             existing_containers.add(container)
                         except CreateContainerError, err:
                             if err.status_int == HTTP_UNAUTHORIZED:
-                                return HTTPUnauthorized(request=req)
+                                if resp.status_int == HTTP_UNAUTHORIZED:
+                                    raise HTTPUnauthorized(request=self.req)
                             failed_files.append([
                                 quote(destination[:MAX_PATH_LENGTH]),
                                 err.status])
@@ -208,46 +189,52 @@ class ExpandArchiveIterable(BulkIterable):
                                 HTTP_BAD_REQUEST])
                             continue
                         if len(existing_containers) > self.max_containers:
-                            return HTTPBadRequest(
-                                'More than %d base level containers in tar.' %
-                                self.max_containers)
+                            raise HTTPBadRequest(
+                                'More than %d base level '
+                                'containers in tar.' % self.max_containers)
 
                     tar_file = tar.extractfile(tar_info)
-                    new_env = req.environ.copy()
+                    new_env = self.req.environ.copy()
                     new_env['wsgi.input'] = tar_file
                     new_env['PATH_INFO'] = destination
                     new_env['CONTENT_LENGTH'] = tar_info.size
                     new_env['swift.source'] = 'EA'
                     new_env['HTTP_USER_AGENT'] = \
-                        '%s BulkExpand' % req.environ.get('HTTP_USER_AGENT')
+                        '%s BulkExpand' % self.req.environ.get('HTTP_USER_AGENT')
                     create_obj_req = Request.blank(destination, new_env)
                     resp = create_obj_req.get_response(self.app)
                     if resp.status_int // 100 == 2:
                         success_count += 1
                     else:
                         if resp.status_int == HTTP_UNAUTHORIZED:
-                            return HTTPUnauthorized(request=req)
+                            raise HTTPUnauthorized(request=self.req)
                         failed_files.append([
                             quote(destination[:MAX_PATH_LENGTH]), resp.status])
 
-            resp_body = get_response_body(
-                out_content_type,
-                {'Number Files Created': success_count},
-                failed_files)
             if success_count and not failed_files:
-                return HTTPCreated(resp_body, content_type=out_content_type)
+                raise HTTPCreated()
             if failed_files:
-                return HTTPBadGateway(resp_body, content_type=out_content_type)
-            return HTTPBadRequest('Invalid Tar File: No Valid Files')
+                raise HTTPBadRequest()
+            raise HTTPBadRequest('Invalid Tar File: No Valid Files')
+
+        except HTTPException, err:
+            resp_dict = {'Response Code': err.status,
+                         'Response Body': err.body,
+                         'Number Files Created': success_count}
 
         except tarfile.TarError, tar_error:
-            return HTTPBadRequest('Invalid Tar File: %s' % tar_error)
+            resp = HTTPBadRequest('Invalid Tar File: %s' % tar_error)
+            resp_dict = {'Response Code': resp.status,
+                         'Response Body': resp.body}
+
+        resp_body = get_response_body(
+            self.out_content_type, resp_dict, failed_files)
+        yield separator + resp_body
 
 
-class BulkDeleteIterable(BulkIterable):
+class BulkDeleteIterable(object):
 
     def __init__(self, app, conf, req):
-        BulkIterable.__init__(self)
         self.app = app
         self.max_deletes_per_request = int(
             conf.get('max_deletes_per_request', 1000))
@@ -341,7 +328,7 @@ class BulkDeleteIterable(BulkIterable):
                 failed_files.append([quote(delete_path), resp.status])
 
         resp_body = get_response_body(
-            out_content_type,
+            self.out_content_type,
             {'Number Deleted': success_count,
              'Number Not Found': not_found_count},
             failed_files)
@@ -437,14 +424,20 @@ class Bulk(object):
         resp = None
 
         extract_type = req.params.get('extract-archive')
+
         if extract_type is not None and req.method == 'PUT':
             archive_type = {
                 'tar': '', 'tar.gz': 'gz',
                 'tar.bz2': 'bz2'}.get(extract_type.lower().strip('.'))
             if archive_type is not None:
-                resp = HTTPAccepted(request=req)
-                resp.app_iter = ExpandArchiveIterable(
-                    self.app, self.conf, req, archive_type)
+                try:
+                    ea_handler = ExpandArchive(
+                        self.app, self.conf, req, archive_type)
+                    resp = HTTPAccepted(request=req)
+                    resp.app_iter = ea_handler.handle_request_iter()
+
+                except HTTPException, err_resp:
+                    resp = err_resp
             else:
                 resp = HTTPBadRequest("Unsupported archive format")
 
