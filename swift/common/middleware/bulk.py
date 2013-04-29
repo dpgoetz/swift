@@ -232,33 +232,34 @@ class ExpandArchive(object):
         yield separator + resp_body
 
 
-class BulkDeleteIterable(object):
+class BulkDelete(object):
 
     def __init__(self, app, conf, req):
         self.app = app
+        self.req = req
         self.max_deletes_per_request = int(
             conf.get('max_deletes_per_request', 1000))
 
-    def get_objs_to_delete(self, req):
+    def get_objs_to_delete(self):
         """
         Will populate objs_to_delete with data from request input.
-        :params req: a Swob request
         :returns: a list of the contents of req.body when separated by newline.
         :raises: HTTPException on failures
         """
         line = ''
         data_remaining = True
         objs_to_delete = []
-        if req.content_length is None and \
-                req.headers.get('transfer-encoding', '').lower() != 'chunked':
-            raise HTTPLengthRequired(request=req)
+        if self.req.content_length is None and \
+                self.req.headers.get('transfer-encoding',
+                                     '').lower() != 'chunked':
+            raise HTTPLengthRequired(request=self.req)
 
         while data_remaining:
             if '\n' in line:
                 obj_to_delete, line = line.split('\n', 1)
                 objs_to_delete.append(unquote(obj_to_delete))
             else:
-                data = req.body_file.read(MAX_PATH_LENGTH)
+                data = self.req.body_file.read(MAX_PATH_LENGTH)
                 if data:
                     line += data
                 else:
@@ -273,7 +274,7 @@ class BulkDeleteIterable(object):
                 raise HTTPBadRequest('Invalid File Name')
         return objs_to_delete
 
-    def handle_request(self, req, objs_to_delete=None, user_agent='BulkDelete',
+    def handle_request(self, objs_to_delete=None, user_agent='BulkDelete',
                        swift_source='BD'):
         """
         :params req: a swob Request
@@ -281,20 +282,20 @@ class BulkDeleteIterable(object):
         :returns: a swob Response
         """
         try:
-            vrs, account, _junk = req.split_path(2, 3, True)
+            vrs, account, _junk = self.req.split_path(2, 3, True)
         except ValueError:
-            return HTTPNotFound(request=req)
+            return HTTPNotFound(request=self.req)
 
-        incoming_format = req.headers.get('Content-Type')
+        incoming_format = self.req.headers.get('Content-Type')
         if incoming_format and not incoming_format.startswith('text/plain'):
             # For now only accept newline separated object names
-            return HTTPNotAcceptable(request=req)
-        out_content_type = req.accept.best_match(ACCEPTABLE_FORMATS)
+            return HTTPNotAcceptable(request=self.req)
+        out_content_type = self.req.accept.best_match(ACCEPTABLE_FORMATS)
         if not out_content_type:
-            return HTTPNotAcceptable(request=req)
+            return HTTPNotAcceptable(request=self.req)
 
         if objs_to_delete is None:
-            objs_to_delete = self.get_objs_to_delete(req)
+            objs_to_delete = self.get_objs_to_delete()
         failed_files = []
         success_count = not_found_count = 0
         failed_file_response_type = HTTPBadRequest
@@ -307,12 +308,12 @@ class BulkDeleteIterable(object):
                 failed_files.append([quote(delete_path),
                                      HTTPPreconditionFailed().status])
                 continue
-            new_env = req.environ.copy()
+            new_env = self.req.environ.copy()
             new_env['PATH_INFO'] = delete_path
             del(new_env['wsgi.input'])
             new_env['CONTENT_LENGTH'] = 0
             new_env['HTTP_USER_AGENT'] = \
-                '%s %s' % (req.environ.get('HTTP_USER_AGENT'), user_agent)
+                '%s %s' % (self.req.environ.get('HTTP_USER_AGENT'), user_agent)
             new_env['swift.source'] = swift_source
             delete_obj_req = Request.blank(delete_path, new_env)
             resp = delete_obj_req.get_response(self.app)
@@ -321,7 +322,7 @@ class BulkDeleteIterable(object):
             elif resp.status_int == HTTP_NOT_FOUND:
                 not_found_count += 1
             elif resp.status_int == HTTP_UNAUTHORIZED:
-                return HTTPUnauthorized(request=req)
+                return HTTPUnauthorized(request=self.req)
             else:
                 if resp.status_int // 100 == 5:
                     failed_file_response_type = HTTPBadGateway
@@ -443,7 +444,7 @@ class Bulk(object):
 
         if 'bulk-delete' in req.params and req.method == 'DELETE':
             resp = HTTPAccepted(request=req)
-            resp.app_iter = BulkDeleteIterable(self.app, self.conf, req)
+            resp.app_iter = BulkDelete(self.app, self.conf, req)
 
         if resp:
             return resp(env, start_response)
