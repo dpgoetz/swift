@@ -1049,6 +1049,10 @@ class Response(object):
             return self.location
         return self.host_url + self.location
 
+    @property
+    def is_success(self):
+        return self.status_int // 100 == 2
+
     def __call__(self, env, start_response):
         if not self.request:
             self.request = Request(env)

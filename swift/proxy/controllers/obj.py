@@ -40,7 +40,7 @@ from swift.common.utils import ContextPool, normalize_timestamp, \
     config_true_value, public, json, csv_append
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_metadata, check_object_creation, \
-    CONTAINER_LISTING_LIMIT, MAX_FILE_SIZE
+    CONTAINER_LISTING_LIMIT, MAX_FILE_SIZE, MAX_BUFFERED_SLO_SEGMENTS
 from swift.common.exceptions import ChunkReadTimeout, \
     ChunkWriteTimeout, ConnectionTimeout, ListingIterNotFound, \
     ListingIterNotAuthorized, ListingIterError, SloSegmentError
@@ -56,13 +56,31 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPClientDisconnect
 
 
-def segment_listing_iter(listing):
-    listing = iter(listing)
-    while True:
-        seg_dict = listing.next()
-        if isinstance(seg_dict['name'], unicode):
-            seg_dict['name'] = seg_dict['name'].encode('utf-8')
-        yield seg_dict
+class SegmentListing(object):
+
+    def __init__(self, listing):
+        self.listing = iter(listing)
+        self._prepended_segments = []
+
+    def prepend_segments(self, new_segs):
+        """
+        Will prepend given segments to listing when iterating.
+        :raises SloSegmentError: when # segments > MAX_BUFFERED_SLO_SEGMENTS
+        """
+        new_segs.extend(self._prepended_segments)
+        if len(new_segs) > MAX_BUFFERED_SLO_SEGMENTS:
+            raise SloSegmentError('Too many unread slo segments in buffer')
+        self._prepended_segments = new_segs
+
+    def listing_iter(self):
+        while True:
+            if self._prepended_segments:
+                seg_dict = self._prepended_segments.pop(0)
+            else:
+                seg_dict = self.listing.next()
+            if isinstance(seg_dict['name'], unicode):
+                seg_dict['name'] = seg_dict['name'].encode('utf-8')
+            yield seg_dict
 
 
 def copy_headers_into(from_r, to_r):
@@ -110,7 +128,8 @@ class SegmentedIterable(object):
                  is_slo=False):
         self.controller = controller
         self.container = container
-        self.listing = segment_listing_iter(listing)
+        self.segment_listing = SegmentListing(listing)
+        self.listing = self.segment_listing.listing_iter()
         self.is_slo = is_slo
         self.ratelimit_index = 0
         self.segment_dict = None
@@ -165,15 +184,31 @@ class SegmentedIterable(object):
                     'Could not load object segment %(path)s:'
                     ' %(status)s') % {'path': path, 'status': resp.status_int})
             if self.is_slo:
-                if resp.etag != self.segment_dict['hash']:
+                if 'X-Static-Large-Object' in resp.headers:
+                    # this segment is and nested slo object. read in the body
+                    # and add its segments into this slo.
+                    try:
+                        sub_manifest = json.loads(resp.body)
+                        self.segment_listing.prepend_segments(sub_manifest)
+                        sub_etag = md5(''.join(
+                            o['hash'] for o in sub_manifest)).hexdigest()
+                        if sub_etag != self.segment_dict['hash']:
+                            raise SloSegmentError(_(
+                                'Object segment does not match sub-slo: '
+                                '%(path)s etag: %(r_etag)s != %(s_etag)s.' %
+                                {'path': path, 'r_etag': sub_etag,
+                                 's_etag': self.segment_dict['hash']}))
+                        return self._load_next_segment()
+                    except ValueError:
+                        raise SloSegmentError(_(
+                            'Sub SLO has invalid manifest: %s' % path))
+
+                elif resp.etag != self.segment_dict['hash']:
                     raise SloSegmentError(_(
                         'Object segment no longer valid: '
                         '%(path)s etag: %(r_etag)s != %(s_etag)s.' %
                         {'path': path, 'r_etag': resp.etag,
                          's_etag': self.segment_dict['hash']}))
-                if 'X-Static-Large-Object' in resp.headers:
-                    raise SloSegmentError(_(
-                        'SLO can not be made of other SLOs: %s' % path))
             self.segment_iter = resp.app_iter
             # See NOTE: swift_conn at top of file about this.
             self.segment_iter_swift_conn = getattr(resp, 'swift_conn', None)
