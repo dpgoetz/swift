@@ -423,6 +423,8 @@ class BenchGET(Bench):
         if time.time() - self.heartbeat >= 15:
             self.heartbeat = time.time()
             self._log_status('GETS')
+        if not self.names:
+            return
         device, partition, name, container_name = random.choice(self.names)
         with self.connection() as conn:
             try:
