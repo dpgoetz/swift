@@ -32,7 +32,7 @@ from swift.common.utils import config_true_value, LogAdapter
 import swiftclient as client
 from swift.common import direct_client
 from swift.common.http import HTTP_CONFLICT
-from swift.common.utils import json
+from swift.common.utils import json, StatsdClient
 
 
 def _func_on_containers(logger, conf, concurrency_key, func):
@@ -186,6 +186,9 @@ class Bench(object):
                 self.url = url
             else:
                 self.url = conf.url
+            if conf.proxy_prefix:
+# need to add snet here between https and hostname
+                self.url = conf.proxy_prefix + self.url
         else:
             self.token = 'SlapChop!'
             self.account = conf.account
@@ -213,6 +216,17 @@ class Bench(object):
                                         max(self.put_concurrency,
                                             self.get_concurrency,
                                             self.del_concurrency))
+        self.statsd_client = None
+        try:
+            self.statsd_client = StatsdClient(
+                conf.statsd_host, int(conf.statsd_port),
+                base_prefix=conf.statsd_metric_prefix,
+                default_sample_rate=float(conf.statsd_default_sample_rate),
+                sample_rate_factor=float(conf.statsd_sample_rate_factor))
+        except AttributeError:
+            pass
+
+
 
     def _log_status(self, title):
         total = time.time() - self.beginbeat
@@ -234,7 +248,7 @@ class Bench(object):
                     hc.close()
                 except Exception:
                     pass
-                self.failures += 1
+                self.log_failure('connection_failure')
                 hc = self.conn_pool.create()
         finally:
             self.conn_pool.put(hc)
@@ -254,6 +268,11 @@ class Bench(object):
 
     def _run(self, thread):
         return
+
+    def log_failure(self, fail_tag):
+        self.failures += 1
+        if self.statsd_client:
+            self.statsd_client.increment(fail_tag)
 
 
 class DistributedBenchController(object):
@@ -342,6 +361,16 @@ class DistributedBenchController(object):
         return result
 
 
+def bench_timer(func):
+    def log_time(self, *args, **kwargs):
+        if self.statsd_client:
+            start_time = time.time()
+            func(self, *args, **kwargs)
+            total_time = (time.time() - start_time) * 1000
+            self.statsd_client.timing(self.msg, total_time)
+    return log_time
+
+
 class BenchController(object):
 
     def __init__(self, logger, conf):
@@ -390,6 +419,7 @@ class BenchDELETE(Bench):
         self.total = len(names)
         self.msg = 'DEL'
 
+    @bench_timer
     def _run(self, thread):
         if time.time() - self.heartbeat >= 15:
             self.heartbeat = time.time()
@@ -407,7 +437,7 @@ class BenchDELETE(Bench):
                                                        container_name, name)
             except client.ClientException, e:
                 self.logger.debug(str(e))
-                self.failures += 1
+                self.log_failure('delete_failure')
         self.complete += 1
 
 
@@ -419,6 +449,7 @@ class BenchGET(Bench):
         self.total = self.total_gets
         self.msg = 'GETS'
 
+    @bench_timer
     def _run(self, thread):
         if time.time() - self.heartbeat >= 15:
             self.heartbeat = time.time()
@@ -438,9 +469,39 @@ class BenchGET(Bench):
                                                     container_name, name)
             except client.ClientException, e:
                 self.logger.debug(str(e))
-                self.failures += 1
+                self.log_failure('get_failure')
         self.complete += 1
 
+class BenchLISTING(Bench):
+
+    def __init__(self, logger, conf, names):
+        Bench.__init__(self, logger, conf, names)
+        self.concurrency = self.get_concurrency
+        self.total = self.total_gets
+        self.msg = 'LISTING'
+
+    @bench_timer
+    def _run(self, thread):
+        if time.time() - self.heartbeat >= 15:
+            self.heartbeat = time.time()
+            self._log_status('LISTING')
+        if not self.names:
+            return
+        device, partition, name, container_name = random.choice(self.names)
+# these partitions aren't valid for the container
+        with self.connection() as conn:
+            try:
+                if self.use_proxy:
+                    client.get_container(
+                        self.url, self.token, container_name, http_conn=conn)
+                else:
+                    node = {'ip': self.ip, 'port': self.port, 'device': device}
+                    direct_client.direct_get_container(
+                        node, partition, self.account, container_name, limit=1)
+            except client.ClientException, e:
+                self.logger.debug(str(e))
+                self.log_failure('listing_failure')
+        self.complete += 1
 
 class BenchPUT(Bench):
 
@@ -451,6 +512,7 @@ class BenchPUT(Bench):
         self.msg = 'PUTS'
         self.containers = conf.containers
 
+    @bench_timer
     def _run(self, thread):
         if time.time() - self.heartbeat >= 15:
             self.heartbeat = time.time()
@@ -482,7 +544,7 @@ class BenchPUT(Bench):
                                                     content_length=len(source))
             except client.ClientException, e:
                 self.logger.debug(str(e))
-                self.failures += 1
+                self.log_failure('put_failure')
             else:
                 self.names.append((device, partition, name, container_name))
         self.complete += 1
