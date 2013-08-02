@@ -102,6 +102,12 @@ class ObjectController(object):
             'expiring_objects'
         self.expiring_objects_container_divisor = \
             int(conf.get('expiring_objects_container_divisor') or 86400)
+        self.autosplit_account = \
+            (conf.get('auto_create_account_prefix') or '.') + \
+            'autosplit'
+        self.notify_autosplit_object_size = int(
+            conf.get('notify_autosplit_object_size'), 0)
+
 
     def _diskfile(self, device, partition, account, container, obj, **kwargs):
         """Utility method for instantiating a DiskFile."""
@@ -292,6 +298,22 @@ class ObjectController(object):
             raise HTTPBadRequest(body=str(err), request=request,
                                  content_type='text/plain')
 
+    def _notify_autosplitter(self, account, cont, obj, req, device):
+        """
+        Add an async-pending to notify auto-splitter that an object above
+        auto_split size was PUT
+        """
+
+        headers_out = HeaderKeyDict({
+            'x-timestamp': req.headers['x-timestamp'],
+            'x-trans-id': req.headers.get('x-trans-id', '-'),
+            'referer': req.as_referer()})
+
+        self.async_update(
+                'PUT', self.autosplit_account, '.to_be_split',
+                '%s/%s/%s' % (account, cont, obj),
+                None, None, None, headers_out, device)
+
     @public
     @timing_stats()
     def POST(self, request):
@@ -417,6 +439,11 @@ class ObjectController(object):
                 self.delete_at_update(
                     'DELETE', old_delete_at, account, container, obj,
                     request, device)
+        if self.notify_autosplit_object_size and \
+                disk_file.metadata['Content-Length'] > \
+                self.notify_autosplit_object_size:
+            self._notify_autosplitter(account, container, obj, request, device)
+
         if not orig_timestamp or \
                 orig_timestamp < request.headers['x-timestamp']:
             self.container_update(
