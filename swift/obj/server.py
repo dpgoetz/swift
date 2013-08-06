@@ -305,6 +305,9 @@ class ObjectController(object):
         """
 
         headers_out = HeaderKeyDict({
+            'x-size': 0,
+            'x-content-type': 'text/plain',
+            'x-etag': 'd41d8cd98f00b204e9800998ecf8427e',
             'x-timestamp': req.headers['x-timestamp'],
             'x-trans-id': req.headers.get('x-trans-id', '-'),
             'referer': req.as_referer()})
