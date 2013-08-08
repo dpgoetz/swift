@@ -69,6 +69,7 @@ setup(
         'bin/swift-init',
         'bin/swift-object-auditor',
         'bin/swift-object-expirer',
+        'bin/swift-object-autosplit',
         'bin/swift-object-info',
         'bin/swift-object-replicator',
         'bin/swift-object-server',

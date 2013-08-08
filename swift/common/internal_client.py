@@ -224,6 +224,7 @@ class InternalClient(object):
         if isinstance(end_marker, unicode):
             end_marker = end_marker.encode('utf8')
         while True:
+                (path, quote(marker), quote(end_marker))
             resp = self.make_request(
                 'GET', '%s?format=json&marker=%s&end_marker=%s' %
                 (path, quote(marker), quote(end_marker)),

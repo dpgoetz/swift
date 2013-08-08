@@ -16,10 +16,10 @@
 
 from swift.common.daemon import run_daemon
 from swift.common.utils import parse_options
-from swift.obj.autosplit import ObjectSplitter
+from swift.obj.autosplit import ObjectAutoSplit
 from optparse import OptionParser
 
 if __name__ == '__main__':
     parser = OptionParser("%prog CONFIG [options]")
     conf_file, options = parse_options(parser=parser, once=True)
-    run_daemon(ObjectSplitter, conf_file, **options)
+    run_daemon(ObjectAutoSplit, conf_file, **options)
