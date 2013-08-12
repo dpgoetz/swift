@@ -5,10 +5,11 @@ from hashlib import md5
 from eventlet import sleep
 
 from swift.common.daemon import Daemon
-from swift.common.utils import get_logger
+from swift.common.utils import get_logger, FileLikeIter
 from swift.common.internal_client import InternalClient
 from swift.common.http import HTTP_NOT_FOUND
 from swift.proxy.controllers.base import get_container_info
+from swift.common.exceptions import ChunkReadTimeout
 
 
 class ObjectReader(object):
@@ -31,12 +32,26 @@ class ObjectReader(object):
         self.obj_iter = obj_iter
         self.obj_total_length = obj_total_length
         self.segment_length = segment_length
+        self.last_chunk = ''
 
     def segment_make_iter(self):
         """
-        Can be handed to an internal_client.make_request('PUT',) to upload
-        an object segment
+        A generator function that will iterate over self.obj_iter to be
+        used to PUT the object segments.
         """
+        data_read = 0
+        chunk = ''
+        while True:
+            pass
+                with ChunkReadTimeout(self.controller.app.node_timeout):
+                    try:
+                        chunk = self.obj_iter.next()
+                        if len(chunk) + data_read < self.segment_length:
+                            yield chunk
+                        else:
+                            yield chunk[:self.segment_length - data_read]
+                            chunk = ''
+                    except StopIteration:
 
 
 class ObjectAutoSplit(Daemon):
@@ -99,7 +114,7 @@ class ObjectAutoSplit(Daemon):
         except UnexpectedResponse, e:
             if e.resp.status_int == HTTP_NOT_FOUND:
                 return True
-            self.logger.error('Attempt to split %s failed: %s (%s)' % (
+            self.logger.error('Split %s failed on cust_obj GET: %s (%s)' % (
                 obj_path, e.resp.headers['X-Trans-Id']))
             return False
 
@@ -115,9 +130,22 @@ class ObjectAutoSplit(Daemon):
         obj_reader = ObjectReader(
             resp.app_iter, obj_len, self.autosplit_segment_size)
 
+        seg_num = 0
         while obj_reader.not_done():
-            # make a new PUT request, give it obj_reader's iter and continue, 
+            # make a new PUT request, give it obj_reader's iter and continue,
 
+            seg_name = '%s_%d' % (obj_seg_name, seg_num)
+            seg_path =  '/'.join(
+                ['', 'v1', self.autosplit_account, seg_container, seg_name])
+            seg_headers = {'x-object-meta-parent-object': obj_path}
+            try:
+                seg_resp = self.swift.make_request(
+                    'PUT', seg_path, seg_headers, (2,),
+                    body_file=FileLikeIter(obj_reader.segment_make_iter()))
+            except UnexpectedResponse, e:
+                self.logger.error('Split %s failed on segment PUT: %s (%s)' % (
+                    seg_path, e.resp.headers['X-Trans-Id']))
+                return False
 
 
 
