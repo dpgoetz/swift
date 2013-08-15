@@ -30,16 +30,17 @@ class ObjectReader(object):
         # of uploaded segments in order
         self.conf = conf
         self.segment_info = []
-        self.obj_iter = obj_iter
+        self.obj_file = FileLikeIter(obj_iter)
         self.obj_total_length = obj_total_length
         self.segment_length = segment_length
         self.last_chunk = ''
         self.node_timeout = int(self.conf.get('node_timeout', 10))
+        self.chunk_size = int(self.conf.get('chunk_size', 1024**1024))
         self.bytes_yielded = 0
         self.read_stopped = False
 
     def yielded_whole_obj(self):
-        return self.bytes_yielded == self.obj_total_length
+        return self.bytes_yielded >= self.obj_total_length
 
     def segment_make_iter(self):
         """
@@ -47,31 +48,37 @@ class ObjectReader(object):
         used to PUT the object segments.
         """
         chunk = ''
+        bytes_yielded_cur = 0
         if self.last_chunk:
+            bytes_yielded_cur = len(self.last_chunk)
             yield '%x\r\n%s\r\n' % (len(self.last_chunk), self.last_chunk)
             self.last_chunk = ''
         while not self.read_stopped:
             with ChunkReadTimeout(self.node_timeout):
                 try:
                     chunk = self.obj_iter.next()
-                    if len(chunk) + self.bytes_yielded < self.segment_length:
-                        self.bytes_yielded += len(chunk)
+                    if not chunk:
+                        continue
+                    if len(chunk) + bytes_yielded_cur < self.segment_length):
+                        bytes_yielded_cur += len(chunk)
                         yield '%x\r\n%s\r\n' % (len(chunk), chunk)
                     else:
-                        marker = self.segment_length - self.bytes_yielded
+                        marker = self.segment_length - bytes_yielded_cur
                         self.last_chunk = chunk[marker:]
-                        self.bytes_yielded += marker
+                        bytes_yielded_cur += marker
                         yield '%x\r\n%s\r\n' % (marker, chunk[:marker])
                         yield '0\r\n\r\n'
                         break
                 except StopIteration:
                     self.read_stopped = True
+                    print 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
                     break
         if self.read_stopped and self.last_chunk:
-            self.bytes_yielded += len(self.last_chunk)
+            bytes_yielded_cur += len(self.last_chunk)
             yield '%x\r\n%s\r\n' % (len(self.last_chunk), self.last_chunk)
             yield '0\r\n\r\n'
             self.last_chunk = ''
+        self.bytes_yielded += bytes_yielded_cur
 
 
 class ObjectAutoSplit(Daemon):
@@ -169,7 +176,7 @@ class ObjectAutoSplit(Daemon):
                            'Transfer-Encoding': 'chunked'}
             try:
                 seg_resp = self.swift.make_request(
-                    'PUT', seg_path, seg_headers, (2,411),
+                    'PUT', seg_path, seg_headers, (2,),
                     body_file=FileLikeIter(obj_reader.segment_make_iter()))
                 
                 seg_info.append(
