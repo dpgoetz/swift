@@ -39,9 +39,6 @@ class ObjectReader(object):
         self.bytes_yielded = 0
         self.read_stopped = False
 
-    def yielded_whole_obj(self):
-        return self.bytes_yielded >= self.obj_total_length
-
     def segment_make_iter(self):
         """
         A generator function that will iterate over self.obj_iter to be
@@ -50,34 +47,24 @@ class ObjectReader(object):
         chunk = ''
         bytes_yielded_cur = 0
         if self.last_chunk:
-            bytes_yielded_cur = len(self.last_chunk)
-            yield '%x\r\n%s\r\n' % (len(self.last_chunk), self.last_chunk)
+            bytes_yielded_cur += len(self.last_chunk)
+            yield self.last_chunk
             self.last_chunk = ''
         while not self.read_stopped:
             with ChunkReadTimeout(self.node_timeout):
-                try:
-                    chunk = self.obj_iter.next()
-                    if not chunk:
-                        continue
-                    if len(chunk) + bytes_yielded_cur < self.segment_length):
-                        bytes_yielded_cur += len(chunk)
-                        yield '%x\r\n%s\r\n' % (len(chunk), chunk)
-                    else:
-                        marker = self.segment_length - bytes_yielded_cur
-                        self.last_chunk = chunk[marker:]
-                        bytes_yielded_cur += marker
-                        yield '%x\r\n%s\r\n' % (marker, chunk[:marker])
-                        yield '0\r\n\r\n'
-                        break
-                except StopIteration:
+                chunk = self.obj_file.read(self.chunk_size)
+                if not chunk:
                     self.read_stopped = True
-                    print 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
                     break
-        if self.read_stopped and self.last_chunk:
-            bytes_yielded_cur += len(self.last_chunk)
-            yield '%x\r\n%s\r\n' % (len(self.last_chunk), self.last_chunk)
-            yield '0\r\n\r\n'
-            self.last_chunk = ''
+                if len(chunk) + bytes_yielded_cur < self.segment_length:
+                    bytes_yielded_cur += len(chunk)
+                    yield chunk
+                else:
+                    marker = self.segment_length - bytes_yielded_cur
+                    self.last_chunk = chunk[marker:]
+                    bytes_yielded_cur += marker
+                    yield chunk[:marker]
+                    break
         self.bytes_yielded += bytes_yielded_cur
 
 
@@ -166,7 +153,7 @@ class ObjectAutoSplit(Daemon):
 
         seg_info = []
         bytes_put = 0
-        while not obj_reader.yielded_whole_obj():
+        while not obj_reader.read_stopped:
             # make a new PUT request, give it obj_reader's iter and continue,
 
             seg_name = '%s_%d' % (obj_seg_name, len(seg_info))
