@@ -99,14 +99,15 @@ class ObjectAutoSplit(Daemon):
 
     def get_segment_info(self, obj_path, obj_last_modified):
        """
-       :returns: a tuple segment_container_name, segment_base. The actual
-                 segment names can be found by appending _0, _1, .. to the
-                 segment_base
+       :returns: a tuple manifest_container_name, segment_container_name,
+                 segment_base. The actual segment names can be found by
+                 appending _0, _1, .. to the segment_base
        """
        obj_hash = md5(obj_path).hexdigest()
        obj_segment_name = '%s/%s' % (obj_hash, obj_last_modified)
        container_id = int(obj_hash, 16) % self.number_autosplit_containers
-       return '.segments_%d' % container_id, obj_segment_name
+       return '.manifests_%d' % container_id, '.segments_%d' % container_id, \
+           obj_segment_name
 
     def create_container_if_needed(self, container_name):
         if not self.swift.container_exists(self.autosplit_account,
@@ -137,6 +138,7 @@ class ObjectAutoSplit(Daemon):
             return False
 
         obj_md5 = resp.headers['Etag']
+        obj_content_type = resp.headers['Content-Type']
         obj_len = int(resp.headers['Content-Length'])
         obj_last_modified = float(resp.headers['x-timestamp'])
 
@@ -144,7 +146,7 @@ class ObjectAutoSplit(Daemon):
             return True
         if time() - self.min_age_before_split < obj_last_modified:
             return False
-        seg_container, obj_seg_name = self.get_segment_info(
+        man_container, seg_container, obj_seg_base = self.get_segment_info(
             obj_path, obj_last_modified)
         self.create_container_if_needed(seg_container)
 
@@ -156,7 +158,7 @@ class ObjectAutoSplit(Daemon):
         while not obj_reader.read_stopped:
             # make a new PUT request, give it obj_reader's iter and continue,
 
-            seg_name = '%s_%d' % (obj_seg_name, len(seg_info))
+            seg_name = '%s_%d' % (obj_seg_base, len(seg_info))
             seg_path =  '/'.join(
                 ['', 'v1', self.autosplit_account, seg_container, seg_name])
             seg_headers = {'x-object-meta-parent-object': obj_path,
@@ -165,10 +167,16 @@ class ObjectAutoSplit(Daemon):
                 seg_resp = self.swift.make_request(
                     'PUT', seg_path, seg_headers, (2,),
                     body_file=FileLikeIter(obj_reader.segment_make_iter()))
-                
+
+                last_modified_formatted = \
+                    seg_resp.last_modified.strftime('%Y-%m-%dT%H:%M:%S.%f')
                 seg_info.append(
-                    {"path": seg_path, "etag": seg_resp.headers['Etag'],
-                     "size_bytes": obj_reader.bytes_yielded - bytes_put})
+                    {'name': seg_path,
+                     'bytes': obj_reader.bytes_yielded - bytes_put,
+                     'hash': seg_resp.headers['Etag'],
+                     'content_type': 'application/octet-stream',
+                     'last_modified': last_modified_formatted})
+
                 bytes_put = obj_reader.bytes_yielded
             except UnexpectedResponse, err:
                 self.logger.error('Split %s failed on segment PUT: %s (%s)' % (
@@ -180,6 +188,14 @@ class ObjectAutoSplit(Daemon):
                 self.logger.exception(
                     'Split failed on segment PUT: %s' % seg_path)
                 return False
+
+        # ok- now make the shadow manifest
+        man_path =  '/'.join(
+            ['', 'v1', self.autosplit_account, man_container, obj_seg_base])
+        man_headers = {'Content-Type': obj_content_type,
+                       'X-Object-Meta-Original-Path': obj_path,
+                       'X-Object-Meta-Original-Etag': obj_md5,
+                       'X-AutoSplit-Object': 'True'}
 
         return True
 
