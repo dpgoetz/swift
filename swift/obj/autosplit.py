@@ -1,6 +1,7 @@
 from random import random
 from time import time
 from hashlib import md5
+from StringIO improt StringIO
 
 from eventlet import sleep, Timeout
 
@@ -197,6 +198,9 @@ class ObjectAutoSplit(Daemon):
                        'X-Object-Meta-Original-Etag': obj_md5,
                        'X-AutoSplit-Object': 'True'}
 
+        man_resp = self.swift.make_request(
+            'PUT', man_path, man_headers, (2,),
+            body_file=StringIO(json.dumps(seg_info)))
         return True
 
     def run_once(self, *args, **kwargs):
