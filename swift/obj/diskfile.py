@@ -45,6 +45,7 @@ from swift.common.swob import multi_range_iterator
 PICKLE_PROTOCOL = 2
 ONE_WEEK = 604800
 HASH_FILE = 'hashes.pkl'
+HASH_DB = 'hashes.db'
 METADATA_KEY = 'user.swift.metadata'
 
 
@@ -170,6 +171,58 @@ def hash_suffix(path, reclaim_age):
         pass
     return md5.hexdigest()
 
+class PickleToDbError(Exception):
+    # TODO: put this in exception file
+    pass
+
+
+class HashDb(object):
+    def __init__(self, partition_dir):
+        self.partition_dir = partition_dir
+        self.conn = None
+
+    def initialize(self):
+        # create the db and stuff
+
+    def build_db_from_pickle(partition_dir):
+        """
+        Locks the partition_dir, reads in the pickle data, builds the
+        new sqlite database out of it and removes the pickle.
+        If there is no pickle will build an empty database.
+        TODO: should I just rename it for safety?
+        :raises PickleToDbError: on errors
+        """
+        with lock_path(partition_dir):
+            hashes_file = join(partition_dir, HASH_FILE)
+            with open(hashes_file, 'rb') as fp:
+                hashes = pickle.load(fp)
+            mtime = getmtime(hashes_file)
+            
+
+    def get_hash_data(partition_dir):
+        """
+        Returns the data stored in the hashes.db sqlite dbs. If
+        the partition only has a legacy hashes.pkl file the this
+        will lock the dir, build the hashes.db before returning the data.
+        Data format is:
+        {'abc': {'files_hash': 'abcdefg',
+                 'mtime': '123456.123'}, ...}
+        With:
+            - abc: the suffix_dir name
+            - files_hash: the md5 of the files within the suffix dir
+            - mtime: the last modified time of the files_hash
+        :params partition_dir: the partition directory
+        """
+        hashes_db_loc = join(partition_dir, HASH_DB)
+        if not exists(hashes_db_loc):
+            build_db_from_pickle(partition_dir)
+# do stuff
+
+    def write_hashes_to_db(partition_dir, hashes):
+        """
+        Writes the data in hashes to the hashes.db
+        Will only update rows older than mtime
+        """
 
 def invalidate_hash(suffix_dir):
     """
@@ -209,8 +262,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
     :returns: tuple of (number of suffix dirs hashed, dictionary of hashes)
     """
 
-    hashed = 0
-    hashes_file = join(partition_dir, HASH_FILE)
+    num_hashed = 0
     modified = False
     force_rewrite = False
     hashes = {}
@@ -220,9 +272,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
         recalculate = []
 
     try:
-        with open(hashes_file, 'rb') as fp:
-            hashes = pickle.load(fp)
-        mtime = getmtime(hashes_file)
+        hashes = get_hash_data(partition_dir)
     except Exception:
         do_listdir = True
         force_rewrite = True
@@ -237,23 +287,25 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
             suffix_dir = join(partition_dir, suffix)
             try:
                 hashes[suffix] = hash_suffix(suffix_dir, reclaim_age)
-                hashed += 1
+                num_hashed += 1
             except PathNotDir:
                 del hashes[suffix]
             except OSError:
                 logging.exception(_('Error hashing suffix'))
             modified = True
     if modified:
-        with lock_path(partition_dir):
-            if force_rewrite or not exists(hashes_file) or \
-                    getmtime(hashes_file) == mtime:
-                write_pickle(
-                    hashes, hashes_file, partition_dir, PICKLE_PROTOCOL)
-                return hashed, hashes
-        return get_hashes(partition_dir, recalculate, do_listdir,
-                          reclaim_age)
+        extra_suffixes_hash = write_hashes_to_db(partition_dir, hashes)
+        return num_hashed + extra_suffixes_hash, hashes
+#        with lock_path(partition_dir):
+#            if force_rewrite or not exists(hashes_file) or \
+#                    getmtime(hashes_file) == mtime:
+#                write_pickle(
+#                    hashes, hashes_file, partition_dir, PICKLE_PROTOCOL)
+#                return num_hashed, hashes
+#        return get_hashes(partition_dir, recalculate, do_listdir,
+#                          reclaim_age)
     else:
-        return hashed, hashes
+        return num_hashed, hashes
 
 
 class DiskWriter(object):
