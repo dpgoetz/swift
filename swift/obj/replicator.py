@@ -227,8 +227,10 @@ class ObjectReplicator(Daemon):
         self.logger.increment('partition.update.count.%s' % (job['device'],))
         begin = time.time()
         try:
+            hash_obj = HashDb(job['path'])
+
             num_hashed, local_hash = tpool_reraise(
-                get_hashes, job['path'],
+                hash_obj.get_hashes, job['path'],
                 do_listdir=(self.replication_count % 10) == 0,
                 reclaim_age=self.reclaim_age)
             self.num_suffixes_hashed += num_hashed

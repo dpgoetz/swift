@@ -31,6 +31,7 @@ from contextlib import contextmanager
 
 from xattr import getxattr, setxattr
 from eventlet import Timeout
+import sqlite3
 
 from swift.common.constraints import check_mount
 from swift.common.utils import mkdirs, normalize_timestamp, \
@@ -40,6 +41,7 @@ from swift.common.exceptions import DiskFileError, DiskFileNotExist, \
     DiskFileCollision, DiskFileNoSpace, DiskFileDeviceUnavailable, \
     PathNotDir
 from swift.common.swob import multi_range_iterator
+from swift.common.db import GreenDBConnection
 
 
 PICKLE_PROTOCOL = 2
@@ -177,46 +179,103 @@ class PickleToDbError(Exception):
 
 
 class HashDb(object):
+
     def __init__(self, partition_dir):
         self.partition_dir = partition_dir
-        self.conn = None
 
-    def initialize(self):
-        # create the db and stuff
+    def get_conn(self):
+        hashes_file = join(self.partition_dir, HASH_DB)
+        conn = sqlite3.connect(hashes_file, check_same_thread=False,
+                               factory=GreenDBConnection, timeout=0)
+        conn.row_factory = sqlite3.Row
+        conn.text_factory = str
+        return conn
 
-    def build_db_from_pickle(partition_dir):
+    def initialize(self, hashes=None, mtime=None):
+        """
+        This assumes the the partition_dir has been locked
+        :params hashes: add these hashes to db
+        :params mtime: the default last_modified time on hash inserts
+        """
+        conn = self.get_conn()
+        conn.executescript("""
+            CREATE TABLE suffix_hashes (
+                suffix TEXT PRIMARY KEY,
+                files_hash TEXT,
+                last_modified TEXT DEFAULT (STRFTIME('%s', 'NOW')),
+                version INTEGER DEFAULT 0
+            );
+            CREATE TRIGGER suffix_hashes_update AFTER UPDATE ON suffix_hashes
+            BEGIN
+                UPDATE suffix_hashes
+                SET last_modified = STRFTIME('%s', 'NOW'),
+                version = version + 1
+                WHERE ROWID = new.ROWID;
+            END;
+        """)
+        suffix_hashes = []
+        mtime = str(mtime)
+        for suffix, hsh in hashes.iteritems():
+            suffix_hashes.append((suffix, hsh, mtime))
+        conn.executemany(
+            """
+            INSERT INTO suffix_hashes
+            (suffix, files_hash, last_modified)
+            VALUES (?, ?, ?)""",
+            hash_data)
+        conn.commit()
+        conn.close()
+
+    def build_db(self):
         """
         Locks the partition_dir, reads in the pickle data, builds the
         new sqlite database out of it and removes the pickle.
         If there is no pickle will build an empty database.
-        TODO: should I just rename it for safety?
         :raises PickleToDbError: on errors
         """
         with lock_path(partition_dir):
+            hashes_db_loc = join(self.partition_dir, HASH_DB)
+            if exists(hashes_db_loc):
+                return
             hashes_file = join(partition_dir, HASH_FILE)
-            with open(hashes_file, 'rb') as fp:
-                hashes = pickle.load(fp)
-            mtime = getmtime(hashes_file)
-            
+            hashes, mtime = None, None
+            if exists(hashes_file):
+                with open(hashes_file, 'rb') as fp:
+                    hashes = pickle.load(fp)
+                mtime = getmtime(hashes_file)
+            self.initialize(hashes, mtime)
+            os.unlink(hashes_file)
 
-    def get_hash_data(partition_dir):
+    def get_hash_data(self):
         """
         Returns the data stored in the hashes.db sqlite dbs. If
-        the partition only has a legacy hashes.pkl file the this
-        will lock the dir, build the hashes.db before returning the data.
+        the partition does not have a hashes.db then it will lock the dir,
+        and build the hashes.db from the hashes.pkl before returning the data.
         Data format is:
         {'abc': {'files_hash': 'abcdefg',
-                 'mtime': '123456.123'}, ...}
+                 'mtime': '123456.123',
+                 'version': 0}, ...}
         With:
             - abc: the suffix_dir name
             - files_hash: the md5 of the files within the suffix dir
             - mtime: the last modified time of the files_hash
+            - version: current version of row, is autoincremented on updates
         :params partition_dir: the partition directory
+        TODO: always check for the pickle for old processes hanging around?
         """
-        hashes_db_loc = join(partition_dir, HASH_DB)
+        hashes_db_loc = join(self.partition_dir, HASH_DB)
         if not exists(hashes_db_loc):
-            build_db_from_pickle(partition_dir)
-# do stuff
+            self.build_db()
+
+        conn = self.get_conn()
+        hashes_data = {}
+        for row in conn.execute("""
+                SELECT suffix, files_hash, last_modified, version
+                FROM suffix_hashes"""):
+            hashes_data[row[0]] = {'files_hash': row[1],
+                                   'mtime': row[2],
+                                   'version': row[3]}
+        return hashes_data
 
     def write_hashes_to_db(partition_dir, hashes):
         """
@@ -272,7 +331,8 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
         recalculate = []
 
     try:
-        hashes = get_hash_data(partition_dir)
+        hash_db = HashDb(partition_dir)
+        hashes = hash_db.get_hash_data()
     except Exception:
         do_listdir = True
         force_rewrite = True
@@ -282,11 +342,12 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
                 hashes.setdefault(suff, None)
         modified = True
     hashes.update((hash_, None) for hash_ in recalculate)
-    for suffix, hash_ in hashes.items():
-        if not hash_:
+    for suffix, hash_dict in hashes.items():
+        if not hash_dict:
             suffix_dir = join(partition_dir, suffix)
             try:
-                hashes[suffix] = hash_suffix(suffix_dir, reclaim_age)
+                hashes[suffix] = {
+                    'files_hash': hash_suffix(suffix_dir, reclaim_age)}
                 num_hashed += 1
             except PathNotDir:
                 del hashes[suffix]
