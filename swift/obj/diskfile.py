@@ -27,7 +27,7 @@ import traceback
 from gettext import gettext as _
 from os.path import basename, dirname, exists, getmtime, getsize, join
 from tempfile import mkstemp
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 
 from xattr import getxattr, setxattr
 from eventlet import Timeout
@@ -41,7 +41,7 @@ from swift.common.exceptions import DiskFileError, DiskFileNotExist, \
     DiskFileCollision, DiskFileNoSpace, DiskFileDeviceUnavailable, \
     PathNotDir
 from swift.common.swob import multi_range_iterator
-from swift.common.db import GreenDBConnection
+from swift.common.db import GreenDBConnection, DatabaseConnectionError
 
 
 PICKLE_PROTOCOL = 2
@@ -177,33 +177,110 @@ class PickleToDbError(Exception):
     # TODO: put this in exception file
     pass
 
+class CouldNotCreateDatabaseError(Exception):
+    # TODO: put this in exception file
+    pass
 
-class HashDb(object):
+class HashDb(DatabaseBase):
 
     def __init__(self, partition_dir):
         self.partition_dir = partition_dir
+        self.db_file = join(self.partition_dir, HASH_DB)
+        self.conn = None
+        self.timeout = 10
 
-    def get_conn(self):
-        hashes_file = join(self.partition_dir, HASH_DB)
-        conn = sqlite3.connect(hashes_file, check_same_thread=False,
-                               factory=GreenDBConnection, timeout=0)
-        conn.row_factory = sqlite3.Row
-        conn.text_factory = str
+    def get_db_connection(self, okay_to_create=False):
+        """
+        Returns a properly configured SQLite database connection.
+
+        :param okay_to_create: if True, create the DB if it doesn't exist
+        :returns: DB connection object
+        :raises DatabaseConnectionError: on sqlite3 errors and when db doesn't
+                                         exists and okay_to_create=False
+        """
+        try:
+            connect_time = time.time()
+            conn = sqlite3.connect(self.db_file, check_same_thread=False,
+                                   factory=GreenDBConnection,
+                                   self.timeout=timeout)
+            if self.db_file != ':memory:' and not okay_to_create:
+                # attempt to detect and fail when connect creates the db file
+                stat = os.stat(self.db_file)
+                if stat.st_size == 0 and stat.st_ctime >= connect_time:
+                    os.unlink(self.db_file)
+                    raise DatabaseConnectionError(self.db_file,
+                                                  'DB file created by connect?')
+            conn.row_factory = sqlite3.Row
+            conn.text_factory = str
+            with closing(conn.cursor()) as cur:
+                cur.execute('PRAGMA journal_mode = WAL')
+        except sqlite3.DatabaseError:
+            import traceback
+            raise DatabaseConnectionError(self.db_file, traceback.format_exc(),
+                                          timeout=timeout)
         return conn
 
-    def initialize(self, hashes=None, mtime=None):
+    @contextmanager
+    def get(self):
+        """
+        Use with the "with" statement; returns a database connection to
+        an existing database.
+        """
+        if not self.conn:
+            if self.db_file != ':memory:' and os.path.exists(self.db_file):
+                try:
+                    self.conn = self.get_db_connection()
+                except (sqlite3.DatabaseError, DatabaseConnectionError):
+                    self.check_for_db_corruption(*sys.exc_info())
+            else:
+                raise DatabaseConnectionError(self.db_file, "DB doesn't exist")
+        conn = self.conn
+        self.conn = None
+        try:
+            yield conn
+            conn.rollback()
+            self.conn = conn
+        except sqlite3.DatabaseError:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self.check_for_db_corruption(*sys.exc_info())
+        except (Exception, Timeout):
+            conn.close()
+            raise
+
+    def check_for_db_corruption(self, exc_type, exc_value, exc_traceback):
+        """
+        Examines the error log to check if it was the result of an
+        unrecoverable database corruption type error. If so the db will
+        be thrown away. It will have to be rebuilt.
+        TODO: i should let the next pass rebuild it right? I guess it depends
+        on whats going on.  If I have some hashes i could make part of it...
+        """
+        if 'database disk image is malformed' in str(exc_value):
+            exc_hint = 'malformed'
+        elif 'file is encrypted or is not a database' in str(exc_value):
+            exc_hint = 'corrupted'
+        else:
+            raise exc_type, exc_value, exc_traceback
+        detail = _('Removed %s to %s due to %s database') % \
+                  (self.db_dir, quar_path, exc_hint)
+        logging.exception(detail)
+        os.unlink(self.db_file)
+        raise sqlite3.DatabaseError(detail)
+
+    def make_empty_db(self):
         """
         This assumes the the partition_dir has been locked
-        :params hashes: add these hashes to db
-        :params mtime: the default last_modified time on hash inserts
         """
-        conn = self.get_conn()
+        conn = self.get_db_connection(okay_to_create=True)
         conn.executescript("""
             CREATE TABLE suffix_hashes (
                 suffix TEXT PRIMARY KEY,
                 files_hash TEXT,
                 last_modified TEXT DEFAULT (STRFTIME('%s', 'NOW')),
-                version INTEGER DEFAULT 0
+                version INTEGER NOT NULL DEFAULT 0
             );
             CREATE TRIGGER suffix_hashes_update AFTER UPDATE ON suffix_hashes
             BEGIN
@@ -213,38 +290,62 @@ class HashDb(object):
                 WHERE ROWID = new.ROWID;
             END;
         """)
-        suffix_hashes = []
-        mtime = str(mtime)
-        for suffix, hsh in hashes.iteritems():
-            suffix_hashes.append((suffix, hsh, mtime))
-        conn.executemany(
-            """
-            INSERT INTO suffix_hashes
-            (suffix, files_hash, last_modified)
-            VALUES (?, ?, ?)""",
-            hash_data)
         conn.commit()
-        conn.close()
+        self.conn = conn
+
+    def initialize(self, hashes=None, mtime=None):
+        """
+        This assumes the the partition_dir has been locked
+        :params hashes: a list of hashes dicts {'suff': 'abcd',...} to add
+        :params mtime: the default last_modified time on hash inserts
+        """
+        try:
+            self.make_empty_db()
+        except Exception:
+            #TODO: log this
+            raise CouldNotCreateDatabaseError()
+        if hashes:
+            hash_data = []
+            mtime = mtime or int(time.time())
+            for suffix, hsh in hashes.iteritems():
+                hash_data.append((suffix, hsh, str(mtime)))
+            with self.get() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO suffix_hashes
+                    (suffix, files_hash, last_modified)
+                    VALUES (?, ?, ?)""", hash_data)
+                conn.commit()
 
     def build_db(self):
         """
         Locks the partition_dir, reads in the pickle data, builds the
         new sqlite database out of it and removes the pickle.
         If there is no pickle will build an empty database.
-        :raises PickleToDbError: on errors
+        :raises PickleToDbError: on errors TODO: NOT TRUE
+        :raises CouldNotCreateDatabaseError: when can't even create db
         """
         with lock_path(partition_dir):
-            hashes_db_loc = join(self.partition_dir, HASH_DB)
-            if exists(hashes_db_loc):
+            if exists(self.db_file):
                 return
             hashes_file = join(partition_dir, HASH_FILE)
             hashes, mtime = None, None
-            if exists(hashes_file):
-                with open(hashes_file, 'rb') as fp:
-                    hashes = pickle.load(fp)
-                mtime = getmtime(hashes_file)
-            self.initialize(hashes, mtime)
-            os.unlink(hashes_file)
+            try:
+                if exists(hashes_file):
+                    with open(hashes_file, 'rb') as fp:
+                        hashes = pickle.load(fp)
+                    mtime = getmtime(hashes_file)
+            except Exception:
+                pass
+                #TODO: i can't read the pickle- for now just make an empty db
+
+            try:
+                self.initialize(hashes, mtime)
+                os.unlink(hashes_file)
+            except CouldNotCreateDatabaseError:
+                pass
+                # TODO: what do I do here?
+
 
     def get_hash_data(self):
         """
@@ -263,25 +364,46 @@ class HashDb(object):
         :params partition_dir: the partition directory
         TODO: always check for the pickle for old processes hanging around?
         """
-        hashes_db_loc = join(self.partition_dir, HASH_DB)
-        if not exists(hashes_db_loc):
+        if not exists(self.db_file):
             self.build_db()
 
-        conn = self.get_conn()
         hashes_data = {}
-        for row in conn.execute("""
-                SELECT suffix, files_hash, last_modified, version
-                FROM suffix_hashes"""):
-            hashes_data[row[0]] = {'files_hash': row[1],
-                                   'mtime': row[2],
-                                   'version': row[3]}
+        with self.get() as conn:
+            for row in conn.execute("""
+                    SELECT suffix, files_hash, last_modified, version
+                    FROM suffix_hashes"""):
+                hashes_data[row[0]] = {'files_hash': row[1],
+                                       'mtime': row[2],
+                                       'version': row[3]}
         return hashes_data
 
-    def write_hashes_to_db(partition_dir, hashes):
+    def insert_update_hash(self, suffix, files_hash, version=None):
         """
         Writes the data in hashes to the hashes.db
-        Will only update rows older than mtime
+        Will only update the row if the hash version matches.
+        :params suffix: the suffix to replace/insert
+        :params files_hash: the new hash of the file names in the suffix dir
+        :params version: the version that was pulled.
+        :raises DatabaseConnectionError: when db doesn't exist
         """
+        with self.get() as conn:
+            conn.execute('BEGIN')
+            if version is None:
+                try:
+                    conn.execute("""
+                    INSERT INTO suffix_hashes (suffix, files_hash)
+                    VALUES (?, ?)""" % (suffix, hash_data['files_hash']))
+                    conn.commit()
+                except sqlite3.IntegrityError:
+                    pass
+            else:
+                curs = conn.execute("""
+                    UPDATE suffix_hashes set files_hash = ?
+                    WHERE suffix = ?
+                    AND version = ?""" % (files_hash, suffix, version))
+                conn.commit()
+            # either it was successful or has been overwritten since SELECT
+
 
 def invalidate_hash(suffix_dir):
     """
@@ -325,48 +447,49 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
     modified = False
     force_rewrite = False
     hashes = {}
-    mtime = -1
 
     if recalculate is None:
         recalculate = []
 
+    hash_db = HashDb(partition_dir)
     try:
-        hash_db = HashDb(partition_dir)
         hashes = hash_db.get_hash_data()
     except Exception:
         do_listdir = True
         force_rewrite = True
+    # TODO i'm not guaranteed that there is a db here if this threw an Exception
     if do_listdir:
         for suff in os.listdir(partition_dir):
             if len(suff) == 3:
-                hashes.setdefault(suff, None)
+                hashes.setdefault(suff, {})
         modified = True
-    hashes.update((hash_, None) for hash_ in recalculate)
+    for hsh in recalculate:
+        if hsh in hashes:
+            hashes[hsh]['files_hash'] = None
+        else:
+            hashes[hsh] = None
     for suffix, hash_dict in hashes.items():
-        if not hash_dict:
+        if not (hash_dict and hash_dict['files_hash']):
             suffix_dir = join(partition_dir, suffix)
             try:
-                hashes[suffix] = {
-                    'files_hash': hash_suffix(suffix_dir, reclaim_age)}
+                hash_db.insert_update_hash(
+                    suffix, hash_suffix(suffix_dir, reclaim_age),
+                    hash_dict.get('version', None))
                 num_hashed += 1
             except PathNotDir:
-                del hashes[suffix]
+                hash_db.delete_hash(suffix)
             except OSError:
+                #TODO: should I have a counter for # errors?
+                # don't know how i;d use it
                 logging.exception(_('Error hashing suffix'))
+            #TODO: what do i do about db errors here?
             modified = True
+    ret_hashes = dict((suffix, data_dict['files_hash']) for
+                      suffix, data_dict in hashes.iteritems())
     if modified:
-        extra_suffixes_hash = write_hashes_to_db(partition_dir, hashes)
-        return num_hashed + extra_suffixes_hash, hashes
-#        with lock_path(partition_dir):
-#            if force_rewrite or not exists(hashes_file) or \
-#                    getmtime(hashes_file) == mtime:
-#                write_pickle(
-#                    hashes, hashes_file, partition_dir, PICKLE_PROTOCOL)
-#                return num_hashed, hashes
-#        return get_hashes(partition_dir, recalculate, do_listdir,
-#                          reclaim_age)
+        return num_hashed, ret_hashes
     else:
-        return num_hashed, hashes
+        return num_hashed, ret_hashes
 
 
 class DiskWriter(object):
