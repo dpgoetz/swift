@@ -232,12 +232,14 @@ class ObjectReplicator(Daemon):
         self.logger.increment('partition.update.count.%s' % (job['device'],))
         begin = time.time()
         try:
-            hash_obj = HashDb(job['path'])
-
             num_hashed, local_hash = tpool_reraise(
-                hash_obj.get_hashes, job['path'],
+                get_hashes, job['path'],
                 do_listdir=(self.replication_count % 10) == 0,
                 reclaim_age=self.reclaim_age)
+#            num_hashed, local_hash = tpool_reraise(
+#                get_hashes, job['path'],
+#                do_listdir=(self.replication_count % 10) == 0,
+#                reclaim_age=self.reclaim_age)
             self.num_suffixes_hashed += num_hashed
             self.logger.update_stats('suffix.hashes', num_hashed)
             attempts_left = len(job['nodes'])
@@ -272,10 +274,14 @@ class ObjectReplicator(Daemon):
                                 remote_hash.get(suffix, -1)]
                     if not suffixes:
                         continue
-                    num_hashed, recalc_hash = tpool_reraise(
-                        get_hashes,
+                    
+                    num_hashed, recalc_hash = get_hashes(
                         job['path'], recalculate=suffixes,
                         reclaim_age=self.reclaim_age)
+#                    num_hashed, recalc_hash = tpool_reraise(
+#                        get_hashes,
+#                        job['path'], recalculate=suffixes,
+#                        reclaim_age=self.reclaim_age)
                     self.logger.update_stats('suffix.hashes', num_hashed)
                     local_hash = recalc_hash
                     suffixes = [suffix for suffix in local_hash if
@@ -324,7 +330,7 @@ class ObjectReplicator(Daemon):
                       "%(hashed).2f%% hashed, %(synced).2f%% synced"),
                     {'checked': self.suffix_count,
                      'hashed': (self.num_suffixes_hashed * 100.0) /
-                                self.suffix_count,
+                     self.suffix_count,
                      'synced': (self.suffix_sync * 100.0) / self.suffix_count})
                 self.partition_times.sort()
                 self.logger.info(

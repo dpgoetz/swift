@@ -438,10 +438,14 @@ class ObjectController(object):
                 self.delete_at_update(
                     'DELETE', old_delete_at, account, container, obj,
                     request, device)
-        if self.notify_autosplit_object_size and \
-                disk_file.metadata['Content-Length'] > \
-                self.notify_autosplit_object_size:
-            self._notify_autosplitter(account, container, obj, request, device)
+#        try:
+        if 1:
+            if self.notify_autosplit_object_size and \
+                    int(metadata['Content-Length']) > \
+                    self.notify_autosplit_object_size:
+                self._notify_autosplitter(account, container, obj, request, device)
+#        except Exception:
+#            pass
 
         if not orig_timestamp or \
                 orig_timestamp < request.headers['x-timestamp']:
