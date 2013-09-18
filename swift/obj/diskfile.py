@@ -145,6 +145,7 @@ def hash_cleanup_listdir(hsh_path, reclaim_age=ONE_WEEK):
                 (filename.endswith('.meta') and
                  filename < meta)):      # old meta
                 os.unlink(join(hsh_path, filename))
+                 #TODO: in prod, sometimes join(hsh_path, filename) is somehow a directory...
                 files.remove(filename)
     return files
 
@@ -273,6 +274,11 @@ class HashDb(object):
             conn.close()
             raise
 
+    def close(self):
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
     def check_for_db_corruption(self, exc_type, exc_value, exc_traceback):
         """
         Examines the error log to check if it was the result of an
@@ -367,9 +373,9 @@ class HashDb(object):
 
     def _init_hash_data(self):
         """
-        Returns the data stored in the hashes.db sqlite dbs. If
-        the partition does not have a hashes.db then it will lock the dir,
-        and build the hashes.db from the hashes.pkl before returning the data.
+        Populates self.hashes with the data stored in the hashes.db sqlite dbs.
+        If the partition does not have a hashes.db then it will lock the dir,
+        and build the hashes.db from the hashes.pkl before setting the data.
         Data format is:
         {'abc': {'files_hash': 'abcdef',
                  'mtime': '123456.123',
@@ -380,7 +386,8 @@ class HashDb(object):
             - mtime: the last modified time of the files_hash
             - version: current version of row, is autoincremented on updates
         :params partition_dir: the partition directory
-        TODO: always check for the pickle for old processes hanging around?
+        TODO: always check for the pickle for old processes hanging around
+        running old code- during the release?
         :raises CouldNotCreateDatabaseError: when can't even create db
         """
         if not exists(self.db_file):
@@ -515,12 +522,13 @@ def invalidate_hash(suffix_dir):
 
     suffix = basename(suffix_dir)
     partition_dir = dirname(suffix_dir)
-    try:
+    if 1: #try:
         hash_db = HashDb(partition_dir)
-    except Exception:
-        return
+#    except Exception:
+#        return
         # TODO: what do I do here?
     hash_db.invalidate_files_hash(suffix)
+    hash_db.close()
 
 
 def get_hashes(partition_dir, recalculate=None, do_listdir=False,
@@ -557,6 +565,8 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
         hash_db.refresh_hash(suffix)
 
     hash_db.populate_nulled_hashes()
+
+    hash_db.close()
 
     return hash_db.times_hash_suffix_called, hash_db.get_dict_output()
 

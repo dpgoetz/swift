@@ -236,10 +236,6 @@ class ObjectReplicator(Daemon):
                 get_hashes, job['path'],
                 do_listdir=(self.replication_count % 10) == 0,
                 reclaim_age=self.reclaim_age)
-#            num_hashed, local_hash = tpool_reraise(
-#                get_hashes, job['path'],
-#                do_listdir=(self.replication_count % 10) == 0,
-#                reclaim_age=self.reclaim_age)
             self.num_suffixes_hashed += num_hashed
             self.logger.update_stats('suffix.hashes', num_hashed)
             attempts_left = len(job['nodes'])
@@ -274,14 +270,10 @@ class ObjectReplicator(Daemon):
                                 remote_hash.get(suffix, -1)]
                     if not suffixes:
                         continue
-                    
-                    num_hashed, recalc_hash = get_hashes(
+                    num_hashed, recalc_hash = tpool_reraise(
+                        get_hashes,
                         job['path'], recalculate=suffixes,
                         reclaim_age=self.reclaim_age)
-#                    num_hashed, recalc_hash = tpool_reraise(
-#                        get_hashes,
-#                        job['path'], recalculate=suffixes,
-#                        reclaim_age=self.reclaim_age)
                     self.logger.update_stats('suffix.hashes', num_hashed)
                     local_hash = recalc_hash
                     suffixes = [suffix for suffix in local_hash if
