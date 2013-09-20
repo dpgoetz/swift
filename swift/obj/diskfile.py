@@ -477,7 +477,6 @@ class HashDb(object):
 
         try:
             with self.get() as conn:
-                conn.execute('BEGIN')
                 if version is None:
                     # This is a new record.
                     try:
