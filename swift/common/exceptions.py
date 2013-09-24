@@ -114,3 +114,6 @@ class ListingIterNotAuthorized(ListingIterError):
 
 class SegmentError(SwiftException):
     pass
+
+class HashDbVersionMismatchError(SwiftException):
+    pass
