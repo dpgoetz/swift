@@ -19,6 +19,7 @@ from __future__ import with_statement
 import cPickle as pickle
 import errno
 import os
+import sys
 import time
 import uuid
 import hashlib
@@ -26,26 +27,29 @@ import logging
 import traceback
 from os.path import basename, dirname, exists, getmtime, getsize, join
 from tempfile import mkstemp
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 
 from xattr import getxattr, setxattr
 from eventlet import Timeout
+import sqlite3
 
 from swift import gettext_ as _
 from swift.common.constraints import check_mount
 from swift.common.utils import mkdirs, renamer, fallocate, fsync, fdatasync, \
-    drop_buffer_cache, ThreadPool, lock_path, write_pickle
+    drop_buffer_cache, ThreadPool, lock_path, write_pickle, remove_file
 from swift.common.ondisk import hash_path, normalize_timestamp, \
     storage_directory
 from swift.common.exceptions import DiskFileError, DiskFileNotExist, \
     DiskFileCollision, DiskFileNoSpace, DiskFileDeviceUnavailable, \
-    PathNotDir, DiskFileNotOpenError
+    PathNotDir, DiskFileNotOpenError, HashDbVersionMismatchError
 from swift.common.swob import multi_range_iterator
+from swift.common.db import GreenDBConnection, DatabaseConnectionError
 
 
 PICKLE_PROTOCOL = 2
 ONE_WEEK = 604800
 HASH_FILE = 'hashes.pkl'
+HASH_DB = 'hashes.db'
 METADATA_KEY = 'user.swift.metadata'
 # These are system-set metadata keys that cannot be changed with a POST.
 # They should be lowercase.
@@ -142,6 +146,7 @@ def hash_cleanup_listdir(hsh_path, reclaim_age=ONE_WEEK):
                 (filename.endswith('.meta') and
                  filename < meta)):      # old meta
                 os.unlink(join(hsh_path, filename))
+                 #TODO: in prod, sometimes join(hsh_path, filename) is somehow a directory...
                 files.remove(filename)
     return files
 
@@ -187,6 +192,264 @@ def hash_suffix(path, reclaim_age):
     return md5.hexdigest()
 
 
+class CouldNotCreateDatabaseError(Exception):
+    # TODO: put this in exception file
+    pass
+
+
+class HashDb(object):
+    """
+    A class to interface with the hashes databases.
+    Creating an instance of this class class create the underlying database and
+    populate it with the existing pickle file if it exists. After the db has
+    been populated, the pickle file will be deleted.
+    """
+
+    def __init__(self, partition_dir, reclaim_age=ONE_WEEK):
+        self.partition_dir = partition_dir
+        self.db_file = join(self.partition_dir, HASH_DB)
+        self.conn = None
+        self.timeout = 10
+        self.reclaim_age = reclaim_age
+        self.times_hash_suffix_called = 0
+
+    def _get_db_connection(self, okay_to_create=False):
+        """
+        Returns a properly configured SQLite database connection.
+
+        :param okay_to_create: if True, create the DB if it doesn't exist
+        :returns: DB connection object
+        :raises DatabaseConnectionError: on sqlite3 errors and when db doesn't
+                                         exists and okay_to_create=False
+        """
+        try:
+            connect_time = time.time()
+            conn = sqlite3.connect(self.db_file, check_same_thread=False,
+                                   factory=GreenDBConnection,
+                                   timeout=self.timeout)
+            if self.db_file != ':memory:' and not okay_to_create:
+                # attempt to detect and fail when connect creates the db file
+                stat = os.stat(self.db_file)
+                if stat.st_size == 0 and stat.st_ctime >= connect_time:
+                    os.unlink(self.db_file)
+                    raise DatabaseConnectionError(
+                        self.db_file, 'DB file created by connect?')
+            conn.row_factory = sqlite3.Row
+            conn.text_factory = str
+            with closing(conn.cursor()) as cur:
+                cur.execute('PRAGMA journal_mode = WAL')
+                cur.execute('PRAGMA synchronous = NORMAL')
+        except sqlite3.DatabaseError:
+            raise DatabaseConnectionError(self.db_file, traceback.format_exc(),
+                                          timeout=self.timeout)
+        return conn
+
+    @contextmanager
+    def get(self):
+        """
+        Use with the "with" statement; returns a database connection to
+        an existing database.
+        """
+        if not self.conn:
+            if self.db_file != ':memory:' and os.path.exists(self.db_file):
+                try:
+                    self.conn = self._get_db_connection()
+                except (sqlite3.DatabaseError, DatabaseConnectionError):
+                    self.check_for_db_corruption(*sys.exc_info())
+            else:
+                raise DatabaseConnectionError(self.db_file, "DB doesn't exist")
+        conn = self.conn
+        self.conn = None
+        try:
+            yield conn
+            conn.rollback()
+            self.conn = conn
+        except sqlite3.DatabaseError:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self.check_for_db_corruption(*sys.exc_info())
+        except (Exception, Timeout):
+            conn.close()
+            raise
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+    def check_for_db_corruption(self, exc_type, exc_value, exc_traceback):
+        """
+        Examines the error log to check if it was the result of an
+        unrecoverable database corruption type error. If so the db will
+        be thrown away. It will have to be rebuilt.
+        TODO: i should let the next pass rebuild it right? I guess it depends
+        on whats going on.  If I have some hashes i could make part of it...
+        """
+        if 'database disk image is malformed' in str(exc_value):
+            exc_hint = 'malformed'
+        elif 'file is encrypted or is not a database' in str(exc_value):
+            exc_hint = 'corrupted'
+        else:
+            raise exc_type, exc_value, exc_traceback
+        detail = _('Removed %s due to %s database') % \
+                  (self.db_dir, exc_hint)
+        logging.exception(detail)
+        os.unlink(self.db_file)
+        raise sqlite3.DatabaseError(detail)
+
+    def _make_empty_db(self):
+        """
+        This assumes the the partition_dir has been locked
+        """
+        conn = self._get_db_connection(okay_to_create=True)
+        conn.executescript("""
+            CREATE TABLE suffix_hashes (
+                suffix TEXT PRIMARY KEY,
+                files_hash TEXT,
+            );
+            CREATE TABLE stat (
+                data_version INTEGER NOT NULL DEFAULT 1,
+                db_version INTEGER NOT NULL DEFAULT 1,
+                create_date TEXT NOT NULL DEFAULT (STRFTIME('%s', 'NOW')),
+                last_modified TEXT NOT NULL DEFAULT (STRFTIME('%s', 'NOW'))
+            );
+            CREATE TRIGGER stat_update AFTER UPDATE ON stat
+            BEGIN
+                UPDATE stat
+                SET last_modified = STRFTIME('%s', 'NOW');
+            END;
+        """)
+        conn.commit()
+        self.conn = conn
+
+    def build_db_if_needed(self, recreate=False):
+        """
+        Locks the partition_dir, reads in the pickle data, builds the
+        new sqlite database out of it and removes the pickle.
+        If there is no pickle will build an empty database.
+        :raises CouldNotCreateDatabaseError: when can't even create db
+        """
+        if not recreate and exists(self.db_file):
+            return
+
+        with lock_path(self.partition_dir):
+            if recreate:
+                remove_file(self.db_file)
+            elif exists(self.db_file):
+                return
+            hashes = None
+            pickle_file = join(self.partition_dir, HASH_FILE)
+            try:
+                if not recreate and exists(pickle_file):
+                    with open(pickle_file, 'rb') as fp:
+                        hashes = pickle.load(fp)
+            except Exception:
+                pass
+
+            try:
+                self._make_empty_db()
+            except Exception:
+                logging.exception('Could not create db: %s' % self.db_file)
+                raise CouldNotCreateDatabaseError()
+
+            with self.get() as conn:
+                conn.execute("INSERT into stat (data_version) VALUES (1)")
+                if hashes:
+                    conn.executemany(
+                        """
+                        INSERT INTO suffix_hashes
+                        (suffix, files_hash)
+                        VALUES (?, ?)""", hashes.iteritems())
+                conn.commit()
+
+            if hashes:
+                remove_file(pickle_file)
+
+    def get_hash_data(self):
+        """
+        Returns a tuple: (version, hashes) pulled from the data stored in the
+        hashes.db sqlite dbs. If the partition does not have a hashes.db then
+        it will lock the dir, and build the hashes.db from the hashes.pkl
+        before setting the data.
+        Data format is:
+        {'abc': 'abcdef', ...}
+        With:
+            - abc: the suffix_dir name
+            - abcdef: the md5 of the files within the suffix dir
+        TODO: always check for the pickle for old processes hanging around
+        running old code- during the release?
+        :raises CouldNotCreateDatabaseError: when can't even create db
+        """
+        self.build_db_if_needed()
+
+        version = None
+        hashes = {}
+        with self.get() as conn:
+            version = execute(
+                'SELECT data_version from stat').fetchone()[0]
+            for row in conn.execute("""
+                    SELECT suffix, files_hash FROM suffix_hashes"""):
+                hashes[row[0]] = row[1]
+        return version, hashes
+
+    def populate_null_hashes(self, hashes):
+        modified = False
+        for suffix, hash_dict in hashes.items():
+            if not (hash_dict and hash_dict['files_hash']):
+                suffix_dir = join(self.partition_dir, suffix)
+                try:
+                    hashes[suffix] = hash_suffix(suffix_dir, self.reclaim_age)
+                    self.times_hash_suffix_called += 1
+                except PathNotDir:
+                    del(hashes[suffix])
+                except OSError:
+                    logging.exception(_('Error hashing suffix'))
+            modified = True
+        return modified
+
+    def replace_hashes(self, data_version, hashes, force_rewrite=False):
+        """
+        Writes the data in hashes to the hashes.db
+        Will only update the row if the hash version matches.
+        :raises DatabaseConnectionError:
+             when db doesn't exist and fails to create it
+        """
+        with self.get() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            cur_version = conn.execute(
+                'SELECT data_version from stat').fetchone()[0]
+            if not force_rewrite and data_version and \
+                    cur_version != data_version:
+                raise HashDbVersionMismatchError()
+            conn.execute("UPDATE stat SET data_version = ?",
+                         (cur_version + 1,))
+            conn.execute('DELETE from suffix_hashes')
+            conn.executemany(
+                """
+                INSERT INTO suffix_hashes
+                (suffix, files_hash)
+                VALUES (?, ?)""", hashes.iteritems())
+            conn.commit()
+
+    def invalidate_files_hash(suffix):
+        try:
+            with self.get() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                data_version = conn.execute(
+                    "SELECT data_version from stat").fetchone()[0]
+                conn.execute("UPDATE stat SET data_version = ?",
+                             (data_version + 1,))
+                conn.execute(
+                    """UPDATE suffix_hashes
+                       SET file_hash = NULL
+                       WHERE suffix = ?""", (suffix,))
+                conn.commit()
+        except DatabaseConnectionError:
+            pass
+
+
 def invalidate_hash(suffix_dir):
     """
     Invalidates the hash for a suffix_dir in the partition's hashes file.
@@ -197,17 +460,13 @@ def invalidate_hash(suffix_dir):
 
     suffix = basename(suffix_dir)
     partition_dir = dirname(suffix_dir)
-    hashes_file = join(partition_dir, HASH_FILE)
-    with lock_path(partition_dir):
-        try:
-            with open(hashes_file, 'rb') as fp:
-                hashes = pickle.load(fp)
-            if suffix in hashes and not hashes[suffix]:
-                return
-        except Exception:
-            return
-        hashes[suffix] = None
-        write_pickle(hashes, hashes_file, partition_dir, PICKLE_PROTOCOL)
+    hash_db = HashDb(partition_dir)
+    try:
+        hash_db.build_db_if_needed()
+        hash_db.invalidate_files_hash(suffix)
+    except Exception:
+        logging.exception('could not invalidate suffix: %s' % suffix_dir)
+    hash_db.close()
 
 
 def get_hashes(partition_dir, recalculate=None, do_listdir=False,
@@ -217,6 +476,12 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
     the hash cache for suffix existence at the (unexpectedly high) cost of a
     listdir.  reclaim_age is just passed on to hash_suffix.
 
+    This is the first step in a larger refactor in how replication works.  With
+    this chage the general pickle way of doing things of pulling out all the
+    hashes, invalidating / reprocessing them and then a big save at them end is
+    maintained. Further commits will change this behavior to better take
+    advantage of what a sqlite db has to offer.
+
     :param partition_dir: absolute path of partition to get hashes for
     :param recalculate: list of suffixes which should be recalculated when got
     :param do_listdir: force existence check for all hashes in the partition
@@ -225,51 +490,58 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
     :returns: tuple of (number of suffix dirs hashed, dictionary of hashes)
     """
 
-    hashed = 0
-    hashes_file = join(partition_dir, HASH_FILE)
     modified = False
     force_rewrite = False
-    hashes = {}
-    mtime = -1
-
     if recalculate is None:
         recalculate = []
+    hashes = {}
+    data_version = None
 
+    hash_db = HashDb(partition_dir, reclaim_age)
     try:
-        with open(hashes_file, 'rb') as fp:
-            hashes = pickle.load(fp)
-        mtime = getmtime(hashes_file)
+        data_version, hashes = hash_db.get_hash_data()
+    except Timeout:
+        logging.info('timeout in reading hash_data: %s' % partition_dir)
+        do_listdir = True
     except Exception:
+        logging.exception('exception reading hash_data: %s' % partition_dir)
         do_listdir = True
         force_rewrite = True
+
     if do_listdir:
-        for suff in os.listdir(partition_dir):
-            if len(suff) == 3:
+        for suffix in os.listdir(partition_dir):
+            if len(suffix) == 3:
+                # later this can be changed to refresh the hash as these are
+                # found
                 hashes.setdefault(suff, None)
         modified = True
-    hashes.update((hash_, None) for hash_ in recalculate)
-    for suffix, hash_ in hashes.items():
-        if not hash_:
-            suffix_dir = join(partition_dir, suffix)
+    hashes.update((hsh, None) for hsh in recalculate)
+
+    modified = hash_db.populate_null_hashes(hashes)
+
+    if modified or force_rewrite:
+        try:
             try:
-                hashes[suffix] = hash_suffix(suffix_dir, reclaim_age)
-                hashed += 1
-            except PathNotDir:
-                del hashes[suffix]
-            except OSError:
-                logging.exception(_('Error hashing suffix'))
-            modified = True
-    if modified:
-        with lock_path(partition_dir):
-            if force_rewrite or not exists(hashes_file) or \
-                    getmtime(hashes_file) == mtime:
-                write_pickle(
-                    hashes, hashes_file, partition_dir, PICKLE_PROTOCOL)
-                return hashed, hashes
-        return get_hashes(partition_dir, recalculate, do_listdir,
-                          reclaim_age)
-    else:
-        return hashed, hashes
+                hash_db.replace_hashes(
+                    data_version, hashes, force_rewrite=force_rewrite)
+            except DatabaseConnectionError:
+                hash_db.build_db_if_needed(read_from_pickle=False,
+                                           remove_first=True)
+                hash_db.replace_hashes(
+                    data_version, hashes, force_rewrite=force_rewrite)
+
+        except HashDbVersionMismatchError:
+            logging.info(
+                'get_hashes called from stale data: %s' % partition_dir)
+            hash_db.close()
+            return get_hashes(partition_dir, recalculate, do_listdir,
+                              reclaim_age)
+        except Exception:
+            logging.exception('Could not save hashes: %s' % partition_dir)
+
+    hash_db.close()
+
+    return hash_db.times_hash_suffix_called, hashes
 
 
 class DiskWriter(object):
