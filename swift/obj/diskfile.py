@@ -513,7 +513,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
             if len(suffix) == 3:
                 # later this can be changed to refresh the hash as these are
                 # found
-                hashes.setdefault(suff, None)
+                hashes.setdefault(suffix, None)
         modified = True
     hashes.update((hsh, None) for hsh in recalculate)
 
