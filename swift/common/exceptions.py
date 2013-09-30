@@ -117,3 +117,6 @@ class SegmentError(SwiftException):
 
 class HashDbVersionMismatchError(SwiftException):
     pass
+
+class ReadingHashesError(SwiftException):
+    pass

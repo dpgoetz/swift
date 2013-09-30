@@ -41,7 +41,8 @@ from swift.common.ondisk import hash_path, normalize_timestamp, \
     storage_directory
 from swift.common.exceptions import DiskFileError, DiskFileNotExist, \
     DiskFileCollision, DiskFileNoSpace, DiskFileDeviceUnavailable, \
-    PathNotDir, DiskFileNotOpenError, HashDbVersionMismatchError
+    PathNotDir, DiskFileNotOpenError, HashDbVersionMismatchError, \
+    ReadingHashesError
 from swift.common.swob import multi_range_iterator
 from swift.common.db import GreenDBConnection, DatabaseConnectionError
 
@@ -307,7 +308,7 @@ class HashDb(object):
         conn.executescript("""
             CREATE TABLE suffix_hashes (
                 suffix TEXT PRIMARY KEY,
-                files_hash TEXT,
+                files_hash TEXT
             );
             CREATE TABLE stat (
                 data_version INTEGER NOT NULL DEFAULT 1,
@@ -330,23 +331,27 @@ class HashDb(object):
         new sqlite database out of it and removes the pickle.
         If there is no pickle will build an empty database.
         :raises CouldNotCreateDatabaseError: when can't even create db
+        :returns boolean as to whether the hashes data need to be refreshed
         """
+        do_listdir = False
         if not recreate and exists(self.db_file):
-            return
+            return False
 
         with lock_path(self.partition_dir):
             if recreate:
                 remove_file(self.db_file)
             elif exists(self.db_file):
-                return
+                return False
             hashes = None
             pickle_file = join(self.partition_dir, HASH_FILE)
+            print 'pickle file: %s: %s' % (pickle_file, recreate)
             try:
                 if not recreate and exists(pickle_file):
+                    print 'vvvvvvvvvvvvvvvvvv'
                     with open(pickle_file, 'rb') as fp:
                         hashes = pickle.load(fp)
             except Exception:
-                pass
+                do_listdir = True
 
             try:
                 self._make_empty_db()
@@ -364,8 +369,10 @@ class HashDb(object):
                         VALUES (?, ?)""", hashes.iteritems())
                 conn.commit()
 
-            if hashes:
+            if hashes or do_listdir:
                 remove_file(pickle_file)
+
+            return do_listdir
 
     def get_hash_data(self):
         """
@@ -381,17 +388,23 @@ class HashDb(object):
         TODO: always check for the pickle for old processes hanging around
         running old code- during the release?
         :raises CouldNotCreateDatabaseError: when can't even create db
+        :raises ReadingHashesError: when could not read in existing hashes
         """
-        self.build_db_if_needed()
+        force_listdir = self.build_db_if_needed()
+        if force_listdir:
+            raise ReadingHashesError()
 
         version = None
         hashes = {}
-        with self.get() as conn:
-            version = execute(
-                'SELECT data_version from stat').fetchone()[0]
-            for row in conn.execute("""
-                    SELECT suffix, files_hash FROM suffix_hashes"""):
-                hashes[row[0]] = row[1]
+        try:
+            with self.get() as conn:
+                version = conn.execute(
+                    'SELECT data_version from stat').fetchone()[0]
+                for row in conn.execute("""
+                        SELECT suffix, files_hash FROM suffix_hashes"""):
+                    hashes[row[0]] = row[1]
+        except Exception:
+            raise ReadingHashesError()
         return version, hashes
 
     def populate_null_hashes(self, hashes):
@@ -433,7 +446,7 @@ class HashDb(object):
                 VALUES (?, ?)""", hashes.iteritems())
             conn.commit()
 
-    def invalidate_files_hash(suffix):
+    def invalidate_files_hash(self, suffix):
         try:
             with self.get() as conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -441,10 +454,16 @@ class HashDb(object):
                     "SELECT data_version from stat").fetchone()[0]
                 conn.execute("UPDATE stat SET data_version = ?",
                              (data_version + 1,))
-                conn.execute(
+                curs = conn.execute(
                     """UPDATE suffix_hashes
-                       SET file_hash = NULL
+                       SET files_hash = NULL
                        WHERE suffix = ?""", (suffix,))
+                if not curs.rowcount:
+                    conn.execute(
+                        """INSERT INTO suffix_hashes
+                           (suffix, files_hash)
+                           VALUES (?, NULL)""", (suffix,))
+
                 conn.commit()
         except DatabaseConnectionError:
             pass
@@ -460,11 +479,13 @@ def invalidate_hash(suffix_dir):
 
     suffix = basename(suffix_dir)
     partition_dir = dirname(suffix_dir)
+    print 'invalidate_hash part_dir: %s' % partition_dir
     hash_db = HashDb(partition_dir)
     try:
         hash_db.build_db_if_needed()
         hash_db.invalidate_files_hash(suffix)
-    except Exception:
+    except Exception as err:
+        print 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: %s' % err
         logging.exception('could not invalidate suffix: %s' % suffix_dir)
     hash_db.close()
 
@@ -503,6 +524,9 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
     except Timeout:
         logging.info('timeout in reading hash_data: %s' % partition_dir)
         do_listdir = True
+    except ReadingHashesError:
+        logging.info('error reading hash_data: %s' % partition_dir)
+        do_listdir = True
     except Exception:
         logging.exception('exception reading hash_data: %s' % partition_dir)
         do_listdir = True
@@ -525,8 +549,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
                 hash_db.replace_hashes(
                     data_version, hashes, force_rewrite=force_rewrite)
             except DatabaseConnectionError:
-                hash_db.build_db_if_needed(read_from_pickle=False,
-                                           remove_first=True)
+                hash_db.build_db_if_needed(recreate=True)
                 hash_db.replace_hashes(
                     data_version, hashes, force_rewrite=force_rewrite)
 

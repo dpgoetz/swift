@@ -195,6 +195,16 @@ class TestDiskFileModuleMethods(unittest.TestCase):
                 fdata = fp.read()
                 self.assertEquals(pickle.loads(fdata), pickle.loads(data))
 
+        def assertDbFileData(file_path, data):
+            print 'lalalala: %s' % os.path.dirname(file_path)
+            hash_db = diskfile.HashDb(os.path.dirname(file_path))
+            hashes = {}
+            with hash_db.get() as conn:
+                for row in conn.execute("""
+                        SELECT suffix, files_hash FROM suffix_hashes"""):
+                    hashes[row[0]] = row[1]
+            self.assertEquals(hashes, data)
+
         df = diskfile.DiskFile(self.devices, 'sda', '0', 'a', 'c', 'o',
                                FakeLogger())
         mkdirs(df.datadir)
@@ -204,8 +214,7 @@ class TestDiskFileModuleMethods(unittest.TestCase):
         hashes_file = os.path.join(self.objects, '0',
                                    diskfile.HASH_FILE)
         # test that non existent file except caught
-        self.assertEquals(diskfile.invalidate_hash(whole_path_from),
-                          None)
+        self.assertEquals(diskfile.invalidate_hash(whole_path_from), None)
         # test that hashes get cleared
         check_pickle_data = pickle.dumps({data_dir: None},
                                          diskfile.PICKLE_PROTOCOL)
@@ -213,7 +222,8 @@ class TestDiskFileModuleMethods(unittest.TestCase):
             with open(hashes_file, 'wb') as fp:
                 pickle.dump(data_hash, fp, diskfile.PICKLE_PROTOCOL)
             diskfile.invalidate_hash(whole_path_from)
-            assertFileData(hashes_file, check_pickle_data)
+            assertDbFileData(hashes_file, {data_dir: None})
+#            assertFileData(hashes_file, check_pickle_data)
 
     def test_get_hashes(self):
         df = diskfile.DiskFile(self.devices, 'sda', '0', 'a', 'c', 'o',
