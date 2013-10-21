@@ -549,6 +549,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
         do_listdir = True
         force_rewrite = True
 
+    print '111: %s' % data_version
     if do_listdir:
         for suffix in os.listdir(partition_dir):
             if len(suffix) == 3:
@@ -560,6 +561,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
 
     modified = hash_db.populate_null_hashes(hashes)
 
+    print 'lalalala: %s' % hashes
     if modified or force_rewrite:
         try:
             try:

@@ -193,7 +193,6 @@ class TestDiskFileModuleMethods(unittest.TestCase):
                 fdata = fp.read()
                 self.assertEquals(pickle.loads(fdata), pickle.loads(data))
 
-<<<<<<< HEAD
         def assertDbFileData(file_path, data):
             print 'lalalala: %s' % os.path.dirname(file_path)
             hash_db = diskfile.HashDb(os.path.dirname(file_path))
@@ -204,13 +203,8 @@ class TestDiskFileModuleMethods(unittest.TestCase):
                     hashes[row[0]] = row[1]
             self.assertEquals(hashes, data)
 
-        df = diskfile.DiskFile(self.devices, 'sda', '0', 'a', 'c', 'o',
-                               FakeLogger())
-        mkdirs(df.datadir)
-=======
         df = self.df_mgr.get_diskfile('sda', '0', 'a', 'c', 'o')
         mkdirs(df._datadir)
->>>>>>> master
         ohash = hash_path('a', 'c', 'o')
         data_dir = ohash[-3:]
         whole_path_from = os.path.join(self.objects, '0', data_dir)
