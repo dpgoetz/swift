@@ -1,4 +1,4 @@
-# Copyright (c) 2010-2012 OpenStack, LLC.
+# Copyright (c) 2010-2012 OpenStack Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,10 +30,9 @@ import simplejson
 
 import swift.common.db
 from swift.common.direct_client import quote
-from swift.common.utils import get_logger, whataremyips, renamer, mkdirs, \
-    lock_parent_directory, config_true_value, unlink_older_than, \
-    dump_recon_cache, rsync_ip
-from swift.common.ondisk import storage_directory
+from swift.common.utils import get_logger, whataremyips, storage_directory, \
+    renamer, mkdirs, lock_parent_directory, config_true_value, \
+    unlink_older_than, dump_recon_cache, rsync_ip
 from swift.common import ring
 from swift.common.http import HTTP_NOT_FOUND, HTTP_INSUFFICIENT_STORAGE
 from swift.common.bufferedhttp import BufferedHTTPConnection

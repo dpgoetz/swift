@@ -1,4 +1,4 @@
-# Copyright (c) 2010-2012 OpenStack, LLC.
+# Copyright (c) 2010-2012 OpenStack Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,9 +30,8 @@ from tempfile import mkstemp
 from eventlet import sleep, Timeout
 import sqlite3
 
-from swift.common.utils import json, renamer, mkdirs, lock_parent_directory, \
-    fallocate
-from swift.common.ondisk import normalize_timestamp
+from swift.common.utils import json, normalize_timestamp, renamer, \
+    mkdirs, lock_parent_directory, fallocate
 from swift.common.exceptions import LockTimeout
 
 

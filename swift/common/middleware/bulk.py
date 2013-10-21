@@ -1,4 +1,4 @@
-# Copyright (c) 2013 OpenStack, LLC.
+# Copyright (c) 2013 OpenStack Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -144,11 +144,11 @@ class Bulk(object):
 
     Will delete multiple objects or containers from their account with a
     single request. Responds to DELETE requests with query parameter
-    ?bulk-delete set. The Content-Type should be set to text/plain.
-    The body of the DELETE request will be a newline separated list of url
-    encoded objects to delete. You can delete 10,000 (configurable) objects
-    per request. The objects specified in the DELETE request body must be URL
-    encoded and in the form:
+    ?bulk-delete set. The request url is your storage url. The Content-Type
+    should be set to text/plain. The body of the DELETE request will be a
+    newline separated list of url encoded objects to delete. You can delete
+    10,000 (configurable) objects per request. The objects specified in the
+    DELETE request body must be URL encoded and in the form:
 
     /container_name/obj_name
 
@@ -241,6 +241,7 @@ class Bulk(object):
         while data_remaining:
             if '\n' in line:
                 obj_to_delete, line = line.split('\n', 1)
+                obj_to_delete = obj_to_delete.strip()
                 objs_to_delete.append(
                     {'name': unquote(obj_to_delete)})
             else:
@@ -249,9 +250,10 @@ class Bulk(object):
                     line += data
                 else:
                     data_remaining = False
-                    if line.strip():
+                    obj_to_delete = line.strip()
+                    if obj_to_delete:
                         objs_to_delete.append(
-                            {'name': unquote(line)})
+                            {'name': unquote(obj_to_delete)})
             if len(objs_to_delete) > self.max_deletes_per_request:
                 raise HTTPRequestEntityTooLarge(
                     'Maximum Bulk Deletes: %d per request' %
@@ -308,7 +310,7 @@ class Bulk(object):
                     separator = '\r\n\r\n'
                     last_yield = time()
                     yield ' '
-                obj_name = obj_to_delete['name'].strip()
+                obj_name = obj_to_delete['name']
                 if not obj_name:
                     continue
                 if len(failed_files) >= self.max_failed_deletes:

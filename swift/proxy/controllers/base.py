@@ -1,4 +1,4 @@
-# Copyright (c) 2010-2012 OpenStack, LLC.
+# Copyright (c) 2010-2012 OpenStack Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,9 +37,9 @@ from eventlet.queue import Queue, Empty, Full
 from eventlet.timeout import Timeout
 
 from swift.common.wsgi import make_pre_authed_env
-from swift.common.utils import config_true_value, public, split_path, \
-    list_from_csv, GreenthreadSafeIterator, quorum_size
-from swift.common.ondisk import normalize_timestamp
+from swift.common.utils import normalize_timestamp, config_true_value, \
+    public, split_path, list_from_csv, GreenthreadSafeIterator, \
+    quorum_size
 from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ChunkReadTimeout, ConnectionTimeout
 from swift.common.http import is_informational, is_success, is_redirection, \
@@ -987,17 +987,17 @@ class Controller(object):
         :param src: the response from the backend
         """
         try:
-            src.swift_conn.close()
-        except Exception:
-            pass
-        src.swift_conn = None
-        try:
-            while src.read(self.app.object_chunk_size):
-                pass
-        except Exception:
-            pass
-        try:
-            src.close()
+            # Since the backends set "Connection: close" in their response
+            # headers, the response object (src) is solely responsible for the
+            # socket. The connection object (src.swift_conn) has no references
+            # to the socket, so calling its close() method does nothing, and
+            # therefore we don't do it.
+            #
+            # Also, since calling the response's close() method might not
+            # close the underlying socket but only decrement some
+            # reference-counter, we have a special method here that really,
+            # really kills the underlying socket with a close() syscall.
+            src.nuke_from_orbit()  # it's the only way to be sure
         except Exception:
             pass
 

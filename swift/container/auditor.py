@@ -1,4 +1,4 @@
-# Copyright (c) 2010-2012 OpenStack, LLC.
+# Copyright (c) 2010-2012 OpenStack Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,9 +23,8 @@ from eventlet import Timeout
 import swift.common.db
 from swift.container import server as container_server
 from swift.container.backend import ContainerBroker
-from swift.common.utils import get_logger, config_true_value, \
-    dump_recon_cache, ratelimit_sleep
-from swift.common.ondisk import audit_location_generator
+from swift.common.utils import get_logger, audit_location_generator, \
+    config_true_value, dump_recon_cache, ratelimit_sleep
 from swift.common.daemon import Daemon
 
 

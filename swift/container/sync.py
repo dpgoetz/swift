@@ -1,4 +1,4 @@
-# Copyright (c) 2010-2012 OpenStack, LLC.
+# Copyright (c) 2010-2012 OpenStack Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,9 +27,8 @@ from swiftclient import ClientException, delete_object, put_object, \
 from swift.container.backend import ContainerBroker
 from swift.common.direct_client import direct_get_object
 from swift.common.ring import Ring
-from swift.common.utils import get_logger, config_true_value, \
-    validate_sync_to, whataremyips, FileLikeIter
-from swift.common.ondisk import audit_location_generator, hash_path
+from swift.common.utils import audit_location_generator, get_logger, \
+    hash_path, config_true_value, validate_sync_to, whataremyips, FileLikeIter
 from swift.common.daemon import Daemon
 from swift.common.http import HTTP_UNAUTHORIZED, HTTP_NOT_FOUND
 
