@@ -40,7 +40,7 @@ import uuid
 import hashlib
 import logging
 import traceback
-from os.path import basename, dirname, exists, getmtime, join
+from os.path import basename, dirname, exists, join
 from tempfile import mkstemp
 from contextlib import contextmanager, closing
 from collections import defaultdict
@@ -57,7 +57,8 @@ from swift.common.utils import mkdirs, normalize_timestamp, \
     config_true_value, remove_file
 from swift.common.exceptions import DiskFileQuarantined, DiskFileNotExist, \
     DiskFileCollision, DiskFileNoSpace, DiskFileDeviceUnavailable, \
-    DiskFileDeleted, DiskFileError, DiskFileNotOpen, PathNotDir
+    DiskFileDeleted, DiskFileError, DiskFileNotOpen, PathNotDir, \
+    ReadingHashesError, HashDbVersionMismatchError
 from swift.common.swob import multi_range_iterator
 from swift.common.db import GreenDBConnection, DatabaseConnectionError
 
@@ -164,7 +165,8 @@ def hash_cleanup_listdir(hsh_path, reclaim_age=ONE_WEEK):
                 (filename.endswith('.meta') and
                  filename < meta)):      # old meta
                 os.unlink(join(hsh_path, filename))
-                 #TODO: in prod, sometimes join(hsh_path, filename) is somehow a directory...
+                 # TODO: in prod, sometimes join(hsh_path, filename) is somehow
+                 # a directory...
                 files.remove(filename)
     return files
 
@@ -361,12 +363,12 @@ class HashDb(object):
                 return False
             hashes = None
             pickle_file = join(self.partition_dir, HASH_FILE)
-            print 'pickle file: %s: %s' % (pickle_file, recreate)
             try:
                 if not recreate and exists(pickle_file):
-                    print 'vvvvvvvvvvvvvvvvvv'
                     with open(pickle_file, 'rb') as fp:
                         hashes = pickle.load(fp)
+                else:
+                    do_listdir = True
             except Exception:
                 do_listdir = True
 
@@ -426,8 +428,8 @@ class HashDb(object):
 
     def populate_null_hashes(self, hashes):
         modified = False
-        for suffix, hash_dict in hashes.items():
-            if not (hash_dict and hash_dict['files_hash']):
+        for suffix, hsh in hashes.items():
+            if not hsh:
                 suffix_dir = join(self.partition_dir, suffix)
                 try:
                     hashes[suffix] = hash_suffix(suffix_dir, self.reclaim_age)
@@ -496,13 +498,11 @@ def invalidate_hash(suffix_dir):
 
     suffix = basename(suffix_dir)
     partition_dir = dirname(suffix_dir)
-    print 'invalidate_hash part_dir: %s' % partition_dir
     hash_db = HashDb(partition_dir)
     try:
         hash_db.build_db_if_needed()
         hash_db.invalidate_files_hash(suffix)
-    except Exception as err:
-        print 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: %s' % err
+    except Exception:
         logging.exception('could not invalidate suffix: %s' % suffix_dir)
     hash_db.close()
 
@@ -538,6 +538,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
     hash_db = HashDb(partition_dir, reclaim_age)
     try:
         data_version, hashes = hash_db.get_hash_data()
+
     except Timeout:
         logging.info('timeout in reading hash_data: %s' % partition_dir)
         do_listdir = True
@@ -549,7 +550,6 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
         do_listdir = True
         force_rewrite = True
 
-    print '111: %s' % data_version
     if do_listdir:
         for suffix in os.listdir(partition_dir):
             if len(suffix) == 3:
@@ -561,7 +561,6 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
 
     modified = hash_db.populate_null_hashes(hashes)
 
-    print 'lalalala: %s' % hashes
     if modified or force_rewrite:
         try:
             try:

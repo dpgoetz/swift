@@ -477,7 +477,7 @@ class TestObjectReplicator(unittest.TestCase):
                               ('2', True), ('3', True)]:
                 self.assertEquals(os.access(
                     os.path.join(self.objects,
-                                 i, diskfile.HASH_FILE),
+                                 i, diskfile.HASH_DB),
                     os.F_OK), result)
         finally:
             object_replicator.http_connect = was_connector
@@ -558,13 +558,6 @@ class TestObjectReplicator(unittest.TestCase):
     @mock.patch('swift.obj.replicator.http_connect', autospec=True)
     def test_update(self, mock_http, mock_tpool_reraise):
 
-        def set_default(self):
-            self.replicator.suffix_count = 0
-            self.replicator.suffix_sync = 0
-            self.replicator.suffix_hash = 0
-            self.replicator.replication_count = 0
-            self.replicator.partition_times = []
-
         self.headers = {'Content-Length': '0',
                         'user-agent': 'obj-replicator %s' % os.getpid()}
         self.replicator.logger = mock_logger = mock.MagicMock()
@@ -581,7 +574,7 @@ class TestObjectReplicator(unittest.TestCase):
         error = '%(ip)s/%(device)s responded as unmounted'
         expect = 'Error syncing partition'
         for job in jobs:
-            set_default(self)
+            self.replicator.reset_stats_vals()
             self.replicator.update(job)
             self.assertTrue(error in mock_logger.error.call_args[0][0])
             self.assertTrue(expect in mock_logger.exception.call_args[0][0])
@@ -593,7 +586,7 @@ class TestObjectReplicator(unittest.TestCase):
                                       job['partition'], 'REPLICATE', '',
                                       headers=self.headers))
             if job['partition'] == '0':
-                self.assertEquals(self.replicator.suffix_hash, 0)
+                self.assertEquals(self.replicator.num_suffixes_hashed, 0)
             mock_http.assert_has_calls(reqs, any_order=True)
             mock_http.reset_mock()
             mock_logger.reset_mock()
@@ -602,7 +595,7 @@ class TestObjectReplicator(unittest.TestCase):
         resp.status = 400
         error = 'Invalid response %(resp)s from %(ip)s'
         for job in jobs:
-            set_default(self)
+            self.replicator.reset_stats_vals()
             self.replicator.update(job)
             self.assertTrue(error in mock_logger.error.call_args[0][0])
             self.assertEquals(len(self.replicator.partition_times), 1)
@@ -613,7 +606,7 @@ class TestObjectReplicator(unittest.TestCase):
         resp.status = 200
         expect = 'Error syncing with node:'
         for job in jobs:
-            set_default(self)
+            self.replicator.reset_stats_vals()
             self.replicator.update(job)
             self.assertTrue(expect in mock_logger.exception.call_args[0][0])
             self.assertEquals(len(self.replicator.partition_times), 1)
@@ -625,7 +618,7 @@ class TestObjectReplicator(unittest.TestCase):
         local_job = None
         resp.read.return_value = pickle.dumps({})
         for job in jobs:
-            set_default(self)
+            self.replicator.reset_stats_vals()
             if job['partition'] == '0':
                 local_job = job.copy()
                 continue
@@ -633,7 +626,7 @@ class TestObjectReplicator(unittest.TestCase):
             self.assertEquals(mock_logger.exception.call_count, 0)
             self.assertEquals(mock_logger.error.call_count, 0)
             self.assertEquals(len(self.replicator.partition_times), 1)
-            self.assertEquals(self.replicator.suffix_hash, 0)
+            self.assertEquals(self.replicator.num_suffixes_hashed, 0)
             self.assertEquals(self.replicator.suffix_sync, 0)
             self.assertEquals(self.replicator.suffix_count, 0)
             mock_logger.reset_mock()
@@ -643,7 +636,7 @@ class TestObjectReplicator(unittest.TestCase):
                                                       '7efb91f5d57336e4'})
         resp.read.return_value = pickle.dumps({'a83': 'c130a2c17ed45102a'
                                                       'ada0f4eee69494ff'})
-        set_default(self)
+        self.replicator.reset_stats_vals()
         self.replicator.rsync = fake_func = mock.MagicMock()
         self.replicator.update(local_job)
         reqs = []
@@ -653,7 +646,7 @@ class TestObjectReplicator(unittest.TestCase):
         self.assertEquals(fake_func.call_count, 2)
         self.assertEquals(self.replicator.replication_count, 1)
         self.assertEquals(self.replicator.suffix_sync, 2)
-        self.assertEquals(self.replicator.suffix_hash, 1)
+        self.assertEquals(self.replicator.num_suffixes_hashed, 1)
         self.assertEquals(self.replicator.suffix_count, 1)
         mock_http.reset_mock()
         mock_logger.reset_mock()
@@ -663,7 +656,7 @@ class TestObjectReplicator(unittest.TestCase):
         for node in repl_job['nodes']:
             node['replication_ip'] = '127.0.0.11'
             node['replication_port'] = '6011'
-        set_default(self)
+        self.replicator.reset_stats_vals()
         self.replicator.update(repl_job)
         reqs = []
         for node in repl_job['nodes']:

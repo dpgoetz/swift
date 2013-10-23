@@ -123,8 +123,10 @@ class ListingIterNotAuthorized(ListingIterError):
 class SegmentError(SwiftException):
     pass
 
+
 class HashDbVersionMismatchError(SwiftException):
     pass
+
 
 class ReadingHashesError(SwiftException):
     pass

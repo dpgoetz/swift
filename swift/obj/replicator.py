@@ -88,6 +88,8 @@ class ObjectReplicator(Daemon):
         self.handoff_delete = config_auto_int_value(
             conf.get('handoff_delete', 'auto'), 0)
 
+        self.reset_stats_vals()
+
     def _rsync(self, args):
         """
         Execute the rsync binary to replicate a partition.
@@ -430,8 +432,7 @@ class ObjectReplicator(Daemon):
         self.job_count = len(jobs)
         return jobs
 
-    def replicate(self, override_devices=None, override_partitions=None):
-        """Run a replication pass"""
+    def reset_stats_vals(self):
         self.start = time.time()
         self.suffix_count = 0
         self.suffix_sync = 0
@@ -439,6 +440,10 @@ class ObjectReplicator(Daemon):
         self.replication_count = 0
         self.last_replication_count = -1
         self.partition_times = []
+
+    def replicate(self, override_devices=None, override_partitions=None):
+        """Run a replication pass"""
+        self.reset_stats_vals()
 
         if override_devices is None:
             override_devices = []

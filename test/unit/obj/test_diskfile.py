@@ -188,13 +188,7 @@ class TestDiskFileModuleMethods(unittest.TestCase):
 
     def test_invalidate_hash(self):
 
-        def assertFileData(file_path, data):
-            with open(file_path, 'r') as fp:
-                fdata = fp.read()
-                self.assertEquals(pickle.loads(fdata), pickle.loads(data))
-
         def assertDbFileData(file_path, data):
-            print 'lalalala: %s' % os.path.dirname(file_path)
             hash_db = diskfile.HashDb(os.path.dirname(file_path))
             hashes = {}
             with hash_db.get() as conn:
@@ -212,15 +206,11 @@ class TestDiskFileModuleMethods(unittest.TestCase):
                                    diskfile.HASH_FILE)
         # test that non existent file except caught
         self.assertEquals(diskfile.invalidate_hash(whole_path_from), None)
-        # test that hashes get cleared
-        check_pickle_data = pickle.dumps({data_dir: None},
-                                         diskfile.PICKLE_PROTOCOL)
         for data_hash in [{data_dir: None}, {data_dir: 'abcdefg'}]:
             with open(hashes_file, 'wb') as fp:
                 pickle.dump(data_hash, fp, diskfile.PICKLE_PROTOCOL)
             diskfile.invalidate_hash(whole_path_from)
             assertDbFileData(hashes_file, {data_dir: None})
-#            assertFileData(hashes_file, check_pickle_data)
 
     def test_get_hashes(self):
         df = self.df_mgr.get_diskfile('sda', '0', 'a', 'c', 'o')
@@ -252,67 +242,16 @@ class TestDiskFileModuleMethods(unittest.TestCase):
         self.assert_('a83' in hashes)
         self.assert_('bad' not in hashes)
 
-    def test_get_hashes_unmodified(self):
-        df = self.df_mgr.get_diskfile('sda', '0', 'a', 'c', 'o')
-        mkdirs(df._datadir)
-        with open(
-                os.path.join(df._datadir,
-                             normalize_timestamp(time()) + '.ts'),
-                'wb') as f:
-            f.write('1234567890')
-        part = os.path.join(self.objects, '0')
-        hashed, hashes = diskfile.get_hashes(part)
-        i = [0]
-
-        def _getmtime(filename):
-            i[0] += 1
-            return 1
-        with unit_mock({'swift.obj.diskfile.getmtime': _getmtime}):
-            hashed, hashes = diskfile.get_hashes(
-                part, recalculate=['a83'])
-        self.assertEquals(i[0], 2)
-
     def test_get_hashes_unmodified_and_zero_bytes(self):
         df = self.df_mgr.get_diskfile('sda', '0', 'a', 'c', 'o')
         mkdirs(df._datadir)
         part = os.path.join(self.objects, '0')
-        open(os.path.join(part, diskfile.HASH_FILE), 'w')
+        open(os.path.join(part, diskfile.HASH_DB), 'w')
         # Now the hash file is zero bytes.
-        i = [0]
 
-        def _getmtime(filename):
-            i[0] += 1
-            return 1
-        with unit_mock({'swift.obj.diskfile.getmtime': _getmtime}):
-            hashed, hashes = diskfile.get_hashes(
-                part, recalculate=[])
-        # getmtime will actually not get called.  Initially, the pickle.load
-        # will raise an exception first and later, force_rewrite will
-        # short-circuit the if clause to determine whether to write out a
-        # fresh hashes_file.
-        self.assertEquals(i[0], 0)
+        hashed, hashes = diskfile.get_hashes(
+            part, recalculate=[])
         self.assertTrue('a83' in hashes)
-
-    def test_get_hashes_modified(self):
-        df = self.df_mgr.get_diskfile('sda', '0', 'a', 'c', 'o')
-        mkdirs(df._datadir)
-        with open(
-                os.path.join(df._datadir,
-                             normalize_timestamp(time()) + '.ts'),
-                'wb') as f:
-            f.write('1234567890')
-        part = os.path.join(self.objects, '0')
-        hashed, hashes = diskfile.get_hashes(part)
-        i = [0]
-
-        def _getmtime(filename):
-            if i[0] < 3:
-                i[0] += 1
-            return i[0]
-        with unit_mock({'swift.obj.diskfile.getmtime': _getmtime}):
-            hashed, hashes = diskfile.get_hashes(
-                part, recalculate=['a83'])
-        self.assertEquals(i[0], 3)
 
     def test_hash_cleanup_listdir(self):
         file_list = []
