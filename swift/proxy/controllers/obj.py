@@ -53,7 +53,7 @@ from swift.common.http import is_success, is_client_error, HTTP_CONTINUE, \
     HTTP_INTERNAL_SERVER_ERROR, HTTP_SERVICE_UNAVAILABLE, \
     HTTP_INSUFFICIENT_STORAGE, HTTP_OK
 from swift.proxy.controllers.base import Controller, delay_denial, \
-    cors_validation
+    cors_validation, exception_occurred
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPRequestTimeout, \
     HTTPServerError, HTTPServiceUnavailable, Request, Response, \
@@ -522,17 +522,6 @@ class ObjectController(Controller):
         return self.iter_nodes(
             ring, partition, node_iter=local_first_node_iter)
 
-    def is_good_source(self, src):
-        """
-        Indicates whether or not the request made to the backend found
-        what it was looking for.
-
-        In the case of an object, a 416 indicates that we found a
-        backend with the object.
-        """
-        return src.status == 416 or \
-            super(ObjectController, self).is_good_source(src)
-
     def GETorHEAD(self, req):
         """Handle HTTP GET or HEAD requests."""
         container_info = self.container_info(
@@ -816,7 +805,7 @@ class ObjectController(Controller):
                         conn.send(chunk)
                 except (Exception, ChunkWriteTimeout):
                     conn.failed = True
-                    self.exception_occurred(conn.node, _('Object'),
+                    exception_occurred(self.app, conn.node, _('Object'),
                                             _('Trying to write to %s') % path)
             conn.queue.task_done()
 
@@ -845,7 +834,7 @@ class ObjectController(Controller):
                 elif resp.status == HTTP_INSUFFICIENT_STORAGE:
                     self.error_limit(node, _('ERROR Insufficient Storage'))
             except (Exception, Timeout):
-                self.exception_occurred(node, _('Object'),
+                exception_occurred(self.app, node, _('Object'),
                                         _('Expect: 100-continue on %s') % path)
 
     @public
@@ -1148,8 +1137,8 @@ class ObjectController(Controller):
                     elif is_success(response.status):
                         etags.add(response.getheader('etag').strip('"'))
             except (Exception, Timeout):
-                self.exception_occurred(
-                    conn.node, _('Object'),
+                exception_occurred(
+                    self.app, conn.node, _('Object'),
                     _('Trying to get final status of PUT to %s') % req.path)
         if len(etags) > 1:
             self.app.logger.error(
