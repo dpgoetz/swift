@@ -1896,6 +1896,7 @@ class TestObjectController(unittest.TestCase):
                 req = Request.blank('/v1/a/c/o', {'REQUEST_METHOD': 'HEAD'})
                 self.app.update_request(req)
                 res = req.get_response(self.app)
+                print 'lala: %s: %s: %s' % (statuses, expected, res.status)
                 self.assertEquals(res.status[:len(str(expected))],
                                   str(expected))
                 if expected < 400:

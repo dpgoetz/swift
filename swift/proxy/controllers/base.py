@@ -28,7 +28,6 @@ import os
 import time
 import functools
 import inspect
-import itertools
 from swift import gettext_ as _
 from urllib import quote
 
@@ -518,114 +517,7 @@ def _get_object_info(app, env, account, container, obj, swift_source=None):
     return None
 
 
-def error_limited(app, node):
-    """
-    Check if the node is currently error limited.
-
-    :param node: dictionary of node to check
-    :returns: True if error limited, False otherwise
-    """
-    now = time.time()
-    if 'errors' not in node:
-        return False
-    if 'last_error' in node and node['last_error'] < \
-            now - app.error_suppression_interval:
-        del node['last_error']
-        if 'errors' in node:
-            del node['errors']
-        return False
-    limited = node['errors'] > app.error_suppression_limit
-    if limited:
-        app.logger.debug(
-            _('Node error limited %(ip)s:%(port)s (%(device)s)'), node)
-    return limited
-
-def iter_nodes(app, ring, partition, node_iter=None):
-    """
-    Yields nodes for a ring partition, skipping over error
-    limited nodes and stopping at the configurable number of
-    nodes. If a node yielded subsequently gets error limited, an
-    extra node will be yielded to take its place.
-
-    Note that if you're going to iterate over this concurrently from
-    multiple greenthreads, you'll want to use a
-    swift.common.utils.GreenthreadSafeIterator to serialize access.
-    Otherwise, you may get ValueErrors from concurrent access. (You also
-    may not, depending on how logging is configured, the vagaries of
-    socket IO and eventlet, and the phase of the moon.)
-
-    :param ring: ring to get yield nodes from
-    :param partition: ring partition to yield nodes for
-    :param node_iter: optional iterable of nodes to try. Useful if you
-        want to filter or reorder the nodes.
-    """
-    part_nodes = ring.get_part_nodes(partition)
-    if node_iter is None:
-        node_iter = itertools.chain(part_nodes,
-                                    ring.get_more_nodes(partition))
-    num_primary_nodes = len(part_nodes)
-
-    # Use of list() here forcibly yanks the first N nodes (the primary
-    # nodes) from node_iter, so the rest of its values are handoffs.
-    primary_nodes = app.sort_nodes(
-        list(itertools.islice(node_iter, num_primary_nodes)))
-    handoff_nodes = node_iter
-    nodes_left = app.request_node_count(ring)
-
-    for node in primary_nodes:
-        if not error_limited(app, node):
-            yield node
-            if not error_limited(app, node):
-                nodes_left -= 1
-                if nodes_left <= 0:
-                    return
-
-    handoffs = 0
-    for node in handoff_nodes:
-        if not error_limited(app, node):
-            handoffs += 1
-            if app.log_handoffs:
-                app.logger.increment('handoff_count')
-                app.logger.warning(
-                    'Handoff requested (%d)' % handoffs)
-                if handoffs == len(primary_nodes):
-                    app.logger.increment('handoff_all_count')
-            yield node
-            if not error_limited(app, node):
-                nodes_left -= 1
-                if nodes_left <= 0:
-                    return
-
-
-def is_good_source(server_type, src):
-    """
-    Indicates whether or not the request made to the backend found
-    what it was looking for.
-
-    :param src: the response from the backend
-    :returns: True if found, False if not
-    """
-    if server_type == 'Object' and src.status == 416:
-        return True
-    return is_success(src.status) or is_redirection(src.status)
-
-
-def exception_occurred(app, node, typ, additional_info):
-    """
-    Handle logging of generic exceptions.
-
-    :param node: dictionary of node to log the error for
-    :param typ: server type
-    :param additional_info: additional information to log
-    """
-    app.logger.exception(
-        _('ERROR with %(type)s server %(ip)s:%(port)s/%(device)s re: '
-          '%(info)s'),
-        {'type': typ, 'ip': node['ip'], 'port': node['port'],
-         'device': node['device'], 'info': additional_info})
-
-
-def close_swift_conn(self, src):
+def close_swift_conn(src):
     """
     Force close the http connection to the backend.
 
@@ -658,7 +550,25 @@ class GetOrHeadHandler(object):
         self.partition = partition
         self.path = path
         self.backend_headers = backend_headers
-        self.used_sources = set()
+        self.used_sources = []
+
+        # populated when finding source
+        self.statuses = []
+        self.reasons = []
+        self.bodies = []
+        self.source_headers = []
+
+    def is_good_source(self, src):
+        """
+        Indicates whether or not the request made to the backend found
+        what it was looking for.
+
+        :param src: the response from the backend
+        :returns: True if found, False if not
+        """
+        if self.server_type == 'Object' and src.status == 416:
+            return True
+        return is_success(src.status) or is_redirection(src.status)
 
     def _make_app_iter(self, node, source):
         """
@@ -680,16 +590,19 @@ class GetOrHeadHandler(object):
                         nchunks += 1
                         bytes_read_from_source += len(chunk)
                 except ChunkReadTimeout:
+                    print 'qqqqqqqqqqqqqqqqqq'
                     self.req.fast_forward(bytes_read_from_source)
-                    new_source = self._get_source()
+
+                    new_source, new_node = self._get_source_and_node()
                     if new_source:
-                        exception_occurred(
-                            self.app, node, _('Object'),
+                        self.app.exception_occurred(
+                            node, _('Object'),
                             _('Trying to read during GET (retrying)'))
                         # Close-out the connection as best as possible.
                         if getattr(source, 'swift_conn', None):
                             close_swift_conn(source)
                         source = new_source
+                        node = new_node
                         bytes_read_from_source = 0
                     else:
                         raise
@@ -715,7 +628,7 @@ class GetOrHeadHandler(object):
                     sleep()
 
         except ChunkReadTimeout:
-            self.exception_occurred(node, _('Object'),
+            self.app.exception_occurred(node, _('Object'),
                                     _('Trying to read during GET'))
             raise
         except ChunkWriteTimeout:
@@ -733,20 +646,23 @@ class GetOrHeadHandler(object):
             if getattr(source, 'swift_conn', None):
                 close_swift_conn(source)
 
-    def _get_source(self):
+    def _get_source_and_node(self):
 
-        statuses = []
-        reasons = []
-        bodies = []
-        source_headers = []
+        self.statuses = []
+        self.reasons = []
+        self.bodies = []
+        self.source_headers = []
         sources = []
         newest = config_true_value(self.req.headers.get('x-newest', 'f'))
 
-        for node in iter_nodes(self.app, self.ring, self.partition):
-            if node in self.used_sources:
-                continue
-            start_node_timing = time.time()
+        for node in self.app.iter_nodes(self.ring, self.partition):
             try:
+                if node in self.used_sources:
+                    continue
+            except Exception as err:
+                raise
+            start_node_timing = time.time()
+            if 1: #try:
                 with ConnectionTimeout(self.app.conn_timeout):
                     conn = http_connect(
                         node['ip'], node['port'], node['device'],
@@ -754,60 +670,69 @@ class GetOrHeadHandler(object):
                         headers=self.backend_headers,
                         query_string=self.req.query_string)
                 self.app.set_node_timing(node, time.time() - start_node_timing)
+
                 with Timeout(self.app.node_timeout):
                     possible_source = conn.getresponse()
                     # See NOTE: swift_conn at top of file about this.
                     possible_source.swift_conn = conn
-            except (Exception, Timeout):
-                exception_occurred(
-                    self.app, node, server_type,
-                    _('Trying to %(method)s %(path)s') %
-                    {'method': self.req.method, 'path': self.req.path})
-                continue
-            if is_good_source(self.server_type, possible_source):
+#            except (Exception, Timeout):
+#                self.app.exception_occurred(
+#                    node, self.server_type,
+#                    _('Trying to %(method)s %(path)s') %
+#                    {'method': self.req.method, 'path': self.req.path})
+#                continue
+            print 'rrrr: %s' % possible_source.status
+            if self.is_good_source(possible_source):
                 # 404 if we know we don't have a synced copy
                 if not float(possible_source.getheader('X-PUT-Timestamp', 1)):
-                    statuses.append(HTTP_NOT_FOUND)
-                    reasons.append('')
-                    bodies.append('')
-                    source_headers.append('')
+                    self.statuses.append(HTTP_NOT_FOUND)
+                    self.reasons.append('')
+                    self.bodies.append('')
+                    self.source_headers.append('')
                     close_swift_conn(possible_source)
                 else:
-                    statuses.append(possible_source.status)
-                    reasons.append(possible_source.reason)
-                    bodies.append('')
-                    source_headers.append('')
+                    self.statuses.append(possible_source.status)
+                    self.reasons.append(possible_source.reason)
+                    self.bodies.append('')
+                    self.source_headers.append('')
                     sources.append((possible_source, node))
                     if not newest:  # one good source is enough
                         break
             else:
-                statuses.append(possible_source.status)
-                reasons.append(possible_source.reason)
-                bodies.append(possible_source.read())
-                source_headers.append(possible_source.getheaders())
+                self.statuses.append(possible_source.status)
+                self.reasons.append(possible_source.reason)
+                self.bodies.append(possible_source.read())
+                self.source_headers.append(possible_source.getheaders())
                 if possible_source.status == HTTP_INSUFFICIENT_STORAGE:
-                    self.error_limit(node, _('ERROR Insufficient Storage'))
+                    self.app.error_limit(node, _('ERROR Insufficient Storage'))
                 elif is_server_error(possible_source.status):
-                    self.error_occurred(node, _('ERROR %(status)d %(body)s '
-                                                'From %(type)s Server') %
+                    print 'ttttttttttttttt'
+                    try:
+                        self.app.error_occurred(
+                            node, _('ERROR %(status)d %(body)s '
+                                    'From %(type)s Server') %
                                         {'status': possible_source.status,
-                                         'body': bodies[-1][:1024],
-                                         'type': server_type})
+                                         'body': self.bodies[-1][:1024],
+                                         'type': self.server_type})
+                    except Exception as err:
+                        print 'wwwwwwwww: %s' % err
+        print 'ggggggggggg: %s' % sources
+
         if sources:
             sources.sort(key=lambda s: source_key(s[0]))
             source, node = sources.pop()
             for src, _junk in sources:
                 close_swift_conn(src)
-            self.used_sources.add(source)
-            return source
-        return None
+            self.used_sources.append(source)
+            return source, node
+        return None, None
 
     def get_working_response(self):
-        source = self._get_source()
+        source, node = self._get_source_and_node()
         res = None
         if source:
-            res = Response(request=req)
-            if req.method == 'GET' and \
+            res = Response(request=self.req)
+            if self.req.method == 'GET' and \
                     source.status in (HTTP_OK, HTTP_PARTIAL_CONTENT):
                 res.app_iter = self._make_app_iter(node, source)
                 # See NOTE: swift_conn at top of file about this.
@@ -910,35 +835,6 @@ class Controller(object):
         headers['referer'] = referer
         return headers
 
-    def error_occurred(self, node, msg):
-        """
-        Handle logging, and handling of errors.
-
-        :param node: dictionary of node to handle errors for
-        :param msg: error message
-        """
-        node['errors'] = node.get('errors', 0) + 1
-        node['last_error'] = time.time()
-        self.app.logger.error(_('%(msg)s %(ip)s:%(port)s/%(device)s'),
-                              {'msg': msg, 'ip': node['ip'],
-                              'port': node['port'], 'device': node['device']})
-
-    def error_limit(self, node, msg):
-        """
-        Mark a node as error limited. This immediately pretends the
-        node received enough errors to trigger error suppression. Use
-        this for errors like Insufficient Storage. For other errors
-        use :func:`error_occurred`.
-
-        :param node: dictionary of node to error limit
-        :param msg: error message
-        """
-        node['errors'] = self.app.error_suppression_limit + 1
-        node['last_error'] = time.time()
-        self.app.logger.error(_('%(msg)s %(ip)s:%(port)s/%(device)s'),
-                              {'msg': msg, 'ip': node['ip'],
-                              'port': node['port'], 'device': node['device']})
-
     def account_info(self, account, req=None):
         """
         Get account information, and also verify that the account exists.
@@ -1028,9 +924,10 @@ class Controller(object):
                         return resp.status, resp.reason, resp.getheaders(), \
                             resp.read()
                     elif resp.status == HTTP_INSUFFICIENT_STORAGE:
-                        self.error_limit(node, _('ERROR Insufficient Storage'))
+                        self.app.error_limit(node,
+                                             _('ERROR Insufficient Storage'))
             except (Exception, Timeout):
-                exception_occurred(self.app, node, self.server_type,
+                self.app.exception_occurred(node, self.server_type,
                                    _('Trying to %(method)s %(path)s') %
                                    {'method': method, 'path': path})
 
@@ -1052,7 +949,7 @@ class Controller(object):
         :returns: a swob.Response object
         """
         start_nodes = ring.get_part_nodes(part)
-        nodes = GreenthreadSafeIterator(iter_nodes(self.app, ring, part))
+        nodes = GreenthreadSafeIterator(self.app.iter_nodes(ring, part))
         pile = GreenPile(len(start_nodes))
         for head in headers:
             pile.spawn(self._make_request, nodes, part, method, path,
@@ -1159,10 +1056,12 @@ class Controller(object):
                                    partition, path, backend_headers)
 
         res = handler.get_working_response()
+#        print 'yyyyy: %s' % res.status
         if not res:
-            res = self.best_response(req, statuses, reasons, bodies,
-                                     '%s %s' % (server_type, req.method),
-                                     headers=source_headers)
+            res = self.best_response(
+                req, handler.statuses, handler.reasons, handler.bodies,
+                '%s %s' % (server_type, req.method),
+                headers=handler.source_headers)
         try:
             (account, container) = split_path(req.path_info, 1, 2)
             _set_info_cache(self.app, req.environ, account, container, res)
@@ -1174,6 +1073,7 @@ class Controller(object):
                                    container, obj, res)
         except ValueError:
             pass
+        print 'uuuuu'
         return res
 
     def is_origin_allowed(self, cors_info, origin):

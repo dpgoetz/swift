@@ -53,7 +53,7 @@ from swift.common.http import is_success, is_client_error, HTTP_CONTINUE, \
     HTTP_INTERNAL_SERVER_ERROR, HTTP_SERVICE_UNAVAILABLE, \
     HTTP_INSUFFICIENT_STORAGE, HTTP_OK
 from swift.proxy.controllers.base import Controller, delay_denial, \
-    cors_validation, exception_occurred
+    cors_validation
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPRequestTimeout, \
     HTTPServerError, HTTPServiceUnavailable, Request, Response, \
@@ -504,7 +504,7 @@ class ObjectController(Controller):
         is_local = self.app.write_affinity_is_local_fn
 
         if is_local is None:
-            return self.iter_nodes(ring, partition)
+            return self.app.iter_nodes(ring, partition)
 
         all_nodes = itertools.chain(primary_nodes,
                                     ring.get_more_nodes(partition))
@@ -519,7 +519,7 @@ class ObjectController(Controller):
             itertools.ifilter(lambda node: node not in first_n_local_nodes,
                               all_nodes))
 
-        return self.iter_nodes(
+        return self.app.iter_nodes(
             ring, partition, node_iter=local_first_node_iter)
 
     def GETorHEAD(self, req):
@@ -537,6 +537,7 @@ class ObjectController(Controller):
         resp = self.GETorHEAD_base(
             req, _('Object'), self.app.object_ring, partition, req.path_info)
 
+        print 'iiiii: %s' % resp.status
         if ';' in resp.headers.get('content-type', ''):
             # strip off swift_bytes from content-type
             content_type, check_extra_meta = \
@@ -805,8 +806,9 @@ class ObjectController(Controller):
                         conn.send(chunk)
                 except (Exception, ChunkWriteTimeout):
                     conn.failed = True
-                    exception_occurred(self.app, conn.node, _('Object'),
-                                            _('Trying to write to %s') % path)
+                    self.app.exception_occurred(
+                        conn.node, _('Object'),
+                        _('Trying to write to %s') % path)
             conn.queue.task_done()
 
     def _connect_put_node(self, nodes, part, path, headers,
@@ -834,14 +836,16 @@ class ObjectController(Controller):
                 elif resp.status == HTTP_INSUFFICIENT_STORAGE:
                     self.error_limit(node, _('ERROR Insufficient Storage'))
             except (Exception, Timeout):
-                exception_occurred(self.app, node, _('Object'),
-                                        _('Expect: 100-continue on %s') % path)
+                self.app.exception_occurred(
+                    node, _('Object'),
+                    _('Expect: 100-continue on %s') % path)
 
     @public
     @cors_validation
     @delay_denial
     def PUT(self, req):
         """HTTP PUT request handler."""
+#        print 'aaaa'
         container_info = self.container_info(
             self.account_name, self.container_name, req)
         container_partition = container_info['partition']
@@ -876,6 +880,7 @@ class ObjectController(Controller):
         partition, nodes = self.app.object_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
         # do a HEAD request for container sync and checking object versions
+#        print 'bbbb'
         if 'x-timestamp' in req.headers or \
                 (object_versions and not
                  req.environ.get('swift_versioned_copy')):
@@ -885,6 +890,7 @@ class ObjectController(Controller):
                 hreq, _('Object'), self.app.object_ring, partition,
                 hreq.path_info)
         # Used by container sync feature
+#        print 'fffff'
         if 'x-timestamp' in req.headers:
             try:
                 req.headers['X-Timestamp'] = \
@@ -915,6 +921,7 @@ class ObjectController(Controller):
 
         error_response = check_object_creation(req, self.object_name) or \
             check_content_type(req)
+#        print 'eeee'
         if error_response:
             return error_response
         if object_versions and not req.environ.get('swift_versioned_copy'):
@@ -954,6 +961,7 @@ class ObjectController(Controller):
         data_source = iter(lambda: reader(self.app.client_chunk_size), '')
         source_header = req.headers.get('X-Copy-From')
         source_resp = None
+#        print 'ddddd'
         if source_header:
             if req.environ.get('swift.orig_req_method', req.method) != 'POST':
                 req.environ.setdefault('swift.log_info', []).append(
@@ -1037,6 +1045,7 @@ class ObjectController(Controller):
         else:
             delete_at_container = delete_at_part = delete_at_nodes = None
 
+#        print 'ccccc'
         node_iter = GreenthreadSafeIterator(
             self.iter_nodes_local_first(self.app.object_ring, partition))
         pile = GreenPile(len(nodes))
@@ -1128,7 +1137,7 @@ class ObjectController(Controller):
                     reasons.append(response.reason)
                     bodies.append(response.read())
                     if response.status >= HTTP_INTERNAL_SERVER_ERROR:
-                        self.error_occurred(
+                        self.app.error_occurred(
                             conn.node,
                             _('ERROR %(status)d %(body)s From Object Server '
                               're: %(path)s') %
@@ -1137,8 +1146,8 @@ class ObjectController(Controller):
                     elif is_success(response.status):
                         etags.add(response.getheader('etag').strip('"'))
             except (Exception, Timeout):
-                exception_occurred(
-                    self.app, conn.node, _('Object'),
+                self.app.exception_occurred(
+                    _('Object'),
                     _('Trying to get final status of PUT to %s') % req.path)
         if len(etags) > 1:
             self.app.logger.error(
