@@ -586,6 +586,7 @@ class Range(object):
         return all_ranges
 
 
+
 class Match(object):
     """
     Wraps a Request's If-None-Match header as a friendly object.
@@ -989,26 +990,6 @@ class Request(object):
             fsize = None
         return fsize
 
-    def fast_forward(self, num_bytes):
-        """
-        Will skip num_bytes into the current ranges.
-        :params num_bytes: the number of bytes that have already been read
-                           on this request. I want to change self.ranges so that
-                           the bytes read will start where it left off.
-        :raises NotImplementedError: if this is a multirange request
-        :raises HTTPRequestedRangeNotSatisfiable: if begin + num_bytes
-                                                  > end of range
-        """
-        if self.range:
-            if len(self.range.ranges) > 1:
-                raise NotImplementedError()
-            begin, end = self.range.ranges.pop()
-            begin += num_bytes
-            if end and begin > end:
-                raise HTTPRequestedRangeNotSatisfiable()
-            self.range = 'bytes=%d-%d' % (begin, end)
-        else:
-            self.range = 'bytes=%d-' % num_bytes
 
 def content_range_header_value(start, stop, size):
     return 'bytes %s-%s/%s' % (start, (stop - 1), size)

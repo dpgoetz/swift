@@ -220,7 +220,6 @@ class Application(object):
         :param req: swob.Request object
         """
         try:
-#            print '111111111'
             self.logger.set_statsd_prefix('proxy-server')
             if req.content_length and req.content_length < 0:
                 self.logger.increment('errors')
@@ -245,7 +244,6 @@ class Application(object):
             except ValueError:
                 self.logger.increment('errors')
                 return HTTPNotFound(request=req)
-#            print '22222222222'
             if not controller:
                 self.logger.increment('errors')
                 return HTTPPreconditionFailed(request=req, body='Bad URL')
@@ -264,7 +262,6 @@ class Application(object):
             req.headers['x-trans-id'] = req.environ['swift.trans_id']
             controller.trans_id = req.environ['swift.trans_id']
             self.logger.client_ip = get_remote_client(req)
-#            print '3333333333333333'
             try:
                 handler = getattr(controller, req.method)
                 getattr(handler, 'publicly_accessible')
@@ -293,14 +290,12 @@ class Application(object):
             # gets mutated during handling.  This way logging can display the
             # method the client actually sent.
             req.environ['swift.orig_req_method'] = req.method
-#            print '88888888888888'
             return handler(req)
         except HTTPException as error_response:
             return error_response
-#        except (Exception, Timeout):
-#            print 'yyyyyyyyyyyyyy'
-#            self.logger.exception(_('ERROR Unhandled exception in request'))
-#            return HTTPServerError(request=req)
+        except (Exception, Timeout):
+            self.logger.exception(_('ERROR Unhandled exception in request'))
+            return HTTPServerError(request=req)
 
     def sort_nodes(self, nodes):
         '''

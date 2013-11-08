@@ -810,7 +810,7 @@ class TestObjectController(unittest.TestCase):
 
             controller = \
                 proxy_server.ObjectController(self.app, 'a', 'c', 'o.jpg')
-            controller.error_limit(
+            self.app.error_limit(
                 self.app.object_ring.get_part_nodes(1)[0], 'test')
             set_http_connect(200, 200,        # account, container
                              201, 201, 201,   # 3 working backends
@@ -1618,6 +1618,7 @@ class TestObjectController(unittest.TestCase):
             self.assertEqual(resp.status_int, 200)
             self.assertEqual(resp.content_length, 6)  # content incomplete
             self.assertEqual(resp.content_type, 'text/html')
+#            print 'lalalala: %s' % resp.body
             self.assertRaises(SegmentError, lambda: resp.body)
             # dropped connection, exception is caught by eventlet as it is
             # iterating over response
@@ -2313,7 +2314,7 @@ class TestObjectController(unittest.TestCase):
                                                                   'container',
                                                                   'object')
                 collected_nodes = []
-                for node in controller.iter_nodes(self.app.object_ring,
+                for node in self.app.iter_nodes(self.app.object_ring,
                                                   partition):
                     collected_nodes.append(node)
                 self.assertEquals(len(collected_nodes), 5)
@@ -2327,7 +2328,7 @@ class TestObjectController(unittest.TestCase):
                                                                   'container',
                                                                   'object')
                 collected_nodes = []
-                for node in controller.iter_nodes(self.app.object_ring,
+                for node in self.app.iter_nodes(self.app.object_ring,
                                                   partition):
                     collected_nodes.append(node)
                 self.assertEquals(len(collected_nodes), 9)
@@ -2342,7 +2343,7 @@ class TestObjectController(unittest.TestCase):
                                                                   'container',
                                                                   'object')
                 collected_nodes = []
-                for node in controller.iter_nodes(self.app.object_ring,
+                for node in self.app.iter_nodes(self.app.object_ring,
                                                   partition):
                     collected_nodes.append(node)
                 self.assertEquals(len(collected_nodes), 5)
@@ -2361,7 +2362,7 @@ class TestObjectController(unittest.TestCase):
                                                                   'container',
                                                                   'object')
                 collected_nodes = []
-                for node in controller.iter_nodes(self.app.object_ring,
+                for node in self.app.iter_nodes(self.app.object_ring,
                                                   partition):
                     collected_nodes.append(node)
                 self.assertEquals(len(collected_nodes), 5)
@@ -2372,7 +2373,7 @@ class TestObjectController(unittest.TestCase):
     def test_iter_nodes_calls_sort_nodes(self):
         with mock.patch.object(self.app, 'sort_nodes') as sort_nodes:
             controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
-            for node in controller.iter_nodes(self.app.object_ring, 0):
+            for node in self.app.iter_nodes(self.app.object_ring, 0):
                 pass
             sort_nodes.assert_called_once_with(
                 self.app.object_ring.get_part_nodes(0))
@@ -2380,12 +2381,12 @@ class TestObjectController(unittest.TestCase):
     def test_iter_nodes_skips_error_limited(self):
         with mock.patch.object(self.app, 'sort_nodes', lambda n: n):
             controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
-            first_nodes = list(controller.iter_nodes(self.app.object_ring, 0))
-            second_nodes = list(controller.iter_nodes(self.app.object_ring, 0))
+            first_nodes = list(self.app.iter_nodes(self.app.object_ring, 0))
+            second_nodes = list(self.app.iter_nodes(self.app.object_ring, 0))
             self.assertTrue(first_nodes[0] in second_nodes)
 
-            controller.error_limit(first_nodes[0], 'test')
-            second_nodes = list(controller.iter_nodes(self.app.object_ring, 0))
+            self.app.error_limit(first_nodes[0], 'test')
+            second_nodes = list(self.app.iter_nodes(self.app.object_ring, 0))
             self.assertTrue(first_nodes[0] not in second_nodes)
 
     def test_iter_nodes_gives_extra_if_error_limited_inline(self):
@@ -2395,11 +2396,11 @@ class TestObjectController(unittest.TestCase):
                                   lambda r: 6),
                 mock.patch.object(self.app.object_ring, 'max_more_nodes', 99)):
             controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
-            first_nodes = list(controller.iter_nodes(self.app.object_ring, 0))
+            first_nodes = list(self.app.iter_nodes(self.app.object_ring, 0))
             second_nodes = []
-            for node in controller.iter_nodes(self.app.object_ring, 0):
+            for node in self.app.iter_nodes(self.app.object_ring, 0):
                 if not second_nodes:
-                    controller.error_limit(node, 'test')
+                    self.app.error_limit(node, 'test')
                 second_nodes.append(node)
             self.assertEquals(len(first_nodes), 6)
             self.assertEquals(len(second_nodes), 7)
@@ -2411,7 +2412,7 @@ class TestObjectController(unittest.TestCase):
                 mock.patch.object(self.app, 'sort_nodes', lambda n: n),
                 mock.patch.object(self.app, 'request_node_count',
                                   lambda r: 3)):
-            got_nodes = list(controller.iter_nodes(self.app.object_ring, 0,
+            got_nodes = list(self.app.iter_nodes(self.app.object_ring, 0,
                                                    node_iter=iter(node_list)))
         self.assertEqual(node_list[:3], got_nodes)
 
@@ -2419,7 +2420,7 @@ class TestObjectController(unittest.TestCase):
                 mock.patch.object(self.app, 'sort_nodes', lambda n: n),
                 mock.patch.object(self.app, 'request_node_count',
                                   lambda r: 1000000)):
-            got_nodes = list(controller.iter_nodes(self.app.object_ring, 0,
+            got_nodes = list(self.app.iter_nodes(self.app.object_ring, 0,
                                                    node_iter=iter(node_list)))
         self.assertEqual(node_list, got_nodes)
 
@@ -4571,6 +4572,7 @@ class TestObjectController(unittest.TestCase):
             gc.collect()
         before_request_instances = len(_request_instances)
         # GET test file, but disconnect early
+        print '-------------------------------------------------------'
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
         fd = sock.makefile()
         fd.write('GET /v1/a/c/test_leak_1 HTTP/1.1\r\n'

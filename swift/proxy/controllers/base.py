@@ -45,7 +45,8 @@ from swift.common.http import is_informational, is_success, is_redirection, \
     is_server_error, HTTP_OK, HTTP_PARTIAL_CONTENT, HTTP_MULTIPLE_CHOICES, \
     HTTP_BAD_REQUEST, HTTP_NOT_FOUND, HTTP_SERVICE_UNAVAILABLE, \
     HTTP_INSUFFICIENT_STORAGE, HTTP_UNAUTHORIZED
-from swift.common.swob import Request, Response, HeaderKeyDict
+from swift.common.swob import Request, Response, HeaderKeyDict, Range, \
+    HTTPException, HTTPRequestedRangeNotSatisfiable
 
 
 def update_headers(response, headers):
@@ -544,19 +545,54 @@ class GetOrHeadHandler(object):
     def __init__(self, app, req, server_type, ring, partition, path,
                  backend_headers):
         self.app = app
-        self.req = req
+#        self.req = req
         self.ring = ring
         self.server_type = server_type
         self.partition = partition
         self.path = path
         self.backend_headers = backend_headers
         self.used_sources = []
+        self.used_source_etags = []
+
+        # stuff from request
+#        self.req_headers = req.headers
+        self.req_method = req.method
+        self.req_path = req.path
+        self.req_query_string = req.query_string
+        self.newest = config_true_value(req.headers.get('x-newest', 'f'))
+#        self.req_range = req.range
 
         # populated when finding source
         self.statuses = []
         self.reasons = []
         self.bodies = []
         self.source_headers = []
+
+    def fast_forward(self, num_bytes):
+        """
+        Will skip num_bytes into the current ranges.
+        :params num_bytes: the number of bytes that have already been read on
+                           this request. I want to change self.ranges so that
+                           the bytes read will
+        start where it left off.
+        :raises NotImplementedError: if this is a multirange request
+        :raises ValueError: if invalid range header
+        :raises HTTPRequestedRangeNotSatisfiable: if begin + num_bytes
+                                                  > end of range
+        """
+        if 'Range' in self.backend_headers:
+            req_range = Range(self.backend_headers['Range'])
+
+            if len(req_range.ranges) > 1:
+                raise NotImplementedError()
+            begin, end = req_range.ranges.pop()
+            begin += num_bytes
+            if end and begin > end:
+                raise HTTPRequestedRangeNotSatisfiable()
+            req_range.ranges = [(begin, end)]
+            self.backend_headers['Range'] = str(req_range)
+        else:
+            self.backend_headers['Range'] = 'bytes=%d-' % num_bytes
 
     def is_good_source(self, src):
         """
@@ -589,10 +625,13 @@ class GetOrHeadHandler(object):
                         chunk = source.read(self.app.object_chunk_size)
                         nchunks += 1
                         bytes_read_from_source += len(chunk)
-                except ChunkReadTimeout:
-                    print 'qqqqqqqqqqqqqqqqqq'
-                    self.req.fast_forward(bytes_read_from_source)
-
+                except ChunkReadTimeout as timeout_err:
+                    if self.newest:
+                        raise
+                    try:
+                        self.fast_forward(bytes_read_from_source)
+                    except (NotImplementedError, HTTPException, ValueError):
+                        raise timeout_err
                     new_source, new_node = self._get_source_and_node()
                     if new_source:
                         self.app.exception_occurred(
@@ -604,6 +643,7 @@ class GetOrHeadHandler(object):
                         source = new_source
                         node = new_node
                         bytes_read_from_source = 0
+                        continue
                     else:
                         raise
                 if not chunk:
@@ -629,7 +669,7 @@ class GetOrHeadHandler(object):
 
         except ChunkReadTimeout:
             self.app.exception_occurred(node, _('Object'),
-                                    _('Trying to read during GET'))
+                                        _('Trying to read during GET'))
             raise
         except ChunkWriteTimeout:
             self.app.logger.warn(
@@ -653,7 +693,6 @@ class GetOrHeadHandler(object):
         self.bodies = []
         self.source_headers = []
         sources = []
-        newest = config_true_value(self.req.headers.get('x-newest', 'f'))
 
         for node in self.app.iter_nodes(self.ring, self.partition):
             try:
@@ -662,26 +701,25 @@ class GetOrHeadHandler(object):
             except Exception as err:
                 raise
             start_node_timing = time.time()
-            if 1: #try:
+            try:
                 with ConnectionTimeout(self.app.conn_timeout):
                     conn = http_connect(
                         node['ip'], node['port'], node['device'],
-                        self.partition, self.req.method, self.path,
+                        self.partition, self.req_method, self.path,
                         headers=self.backend_headers,
-                        query_string=self.req.query_string)
+                        query_string=self.req_query_string)
                 self.app.set_node_timing(node, time.time() - start_node_timing)
 
                 with Timeout(self.app.node_timeout):
                     possible_source = conn.getresponse()
                     # See NOTE: swift_conn at top of file about this.
                     possible_source.swift_conn = conn
-#            except (Exception, Timeout):
-#                self.app.exception_occurred(
-#                    node, self.server_type,
-#                    _('Trying to %(method)s %(path)s') %
-#                    {'method': self.req.method, 'path': self.req.path})
-#                continue
-            print 'rrrr: %s' % possible_source.status
+            except (Exception, Timeout) as err:
+                self.app.exception_occurred(
+                    node, self.server_type,
+                    _('Trying to %(method)s %(path)s') %
+                    {'method': self.req_method, 'path': self.req_path})
+                continue
             if self.is_good_source(possible_source):
                 # 404 if we know we don't have a synced copy
                 if not float(possible_source.getheader('X-PUT-Timestamp', 1)):
@@ -696,7 +734,7 @@ class GetOrHeadHandler(object):
                     self.bodies.append('')
                     self.source_headers.append('')
                     sources.append((possible_source, node))
-                    if not newest:  # one good source is enough
+                    if not self.newest:  # one good source is enough
                         break
             else:
                 self.statuses.append(possible_source.status)
@@ -706,17 +744,12 @@ class GetOrHeadHandler(object):
                 if possible_source.status == HTTP_INSUFFICIENT_STORAGE:
                     self.app.error_limit(node, _('ERROR Insufficient Storage'))
                 elif is_server_error(possible_source.status):
-                    print 'ttttttttttttttt'
-                    try:
-                        self.app.error_occurred(
-                            node, _('ERROR %(status)d %(body)s '
-                                    'From %(type)s Server') %
-                                        {'status': possible_source.status,
-                                         'body': self.bodies[-1][:1024],
-                                         'type': self.server_type})
-                    except Exception as err:
-                        print 'wwwwwwwww: %s' % err
-        print 'ggggggggggg: %s' % sources
+                    self.app.error_occurred(
+                        node, _('ERROR %(status)d %(body)s '
+                                'From %(type)s Server') %
+                                {'status': possible_source.status,
+                                 'body': self.bodies[-1][:1024],
+                                 'type': self.server_type})
 
         if sources:
             sources.sort(key=lambda s: source_key(s[0]))
@@ -727,12 +760,12 @@ class GetOrHeadHandler(object):
             return source, node
         return None, None
 
-    def get_working_response(self):
+    def get_working_response(self, req):
         source, node = self._get_source_and_node()
         res = None
         if source:
-            res = Response(request=self.req)
-            if self.req.method == 'GET' and \
+            res = Response(request=req)
+            if req.method == 'GET' and \
                     source.status in (HTTP_OK, HTTP_PARTIAL_CONTENT):
                 res.app_iter = self._make_app_iter(node, source)
                 # See NOTE: swift_conn at top of file about this.
@@ -1054,9 +1087,8 @@ class Controller(object):
 
         handler = GetOrHeadHandler(self.app, req, server_type, ring,
                                    partition, path, backend_headers)
+        res = handler.get_working_response(req)
 
-        res = handler.get_working_response()
-#        print 'yyyyy: %s' % res.status
         if not res:
             res = self.best_response(
                 req, handler.statuses, handler.reasons, handler.bodies,
@@ -1073,7 +1105,6 @@ class Controller(object):
                                    container, obj, res)
         except ValueError:
             pass
-        print 'uuuuu'
         return res
 
     def is_origin_allowed(self, cors_info, origin):

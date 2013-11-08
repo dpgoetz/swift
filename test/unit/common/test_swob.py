@@ -634,37 +634,6 @@ class TestRequest(unittest.TestCase):
         req.range = None
         self.assert_('Range' not in req.headers)
 
-    def test_range_fast_forward(self):
-        req = swift.common.swob.Request.blank('/')
-        req.range = 'bytes=0-20'
-        req.fast_forward(10)
-        self.assertEquals(req.range.ranges, [(10,20)])
-        req.range = 'bytes=-20,4-,30-150,-10'
-        self.assertRaises(NotImplementedError, req.fast_forward, 8)
-        req.range = 'bytes=0-20'
-        self.assertRaises(swift.common.swob.HTTPException,
-                          req.fast_forward, 80)
-
-    def test_range_fast_forward_body(self):
-
-        def test_app(environ, start_response):
-            r = swift.common.swob.Range(environ['HTTP_RANGE'])
-            beg, end = r.ranges.pop()
-            start_response('200 OK', [('Content-Length', '10')])
-            return ['1234567890'[beg:end+1]]
-
-        def start_response(env, headers):
-            pass
-
-        req = swift.common.swob.Request.blank(
-            '/', headers={'Range': 'bytes=2-8'})
-        req.fast_forward(3)
-        resp = req.get_response(test_app)
-        resp.conditional_response = True
-        body = ''.join(resp([], start_response))
-        self.assertEquals(body, '6789')
-        self.assertEquals(resp.status, '200 OK')
-
     def test_datetime_properties(self):
         req = swift.common.swob.Request.blank('/hi/there', body='hi')
 

@@ -18,8 +18,9 @@ from mock import patch
 from swift.proxy.controllers.base import headers_to_container_info, \
     headers_to_account_info, headers_to_object_info, get_container_info, \
     get_container_memcache_key, get_account_info, get_account_memcache_key, \
-    get_object_env_key, _get_cache_key, get_info, get_object_info, Controller
-from swift.common.swob import Request
+    get_object_env_key, _get_cache_key, get_info, get_object_info, \
+    Controller, GetOrHeadHandler
+from swift.common.swob import Request, HTTPException
 from swift.common.utils import split_path
 from test.unit import fake_http_connect, FakeRing, FakeMemcache
 from swift.proxy import server as proxy_server
@@ -433,3 +434,16 @@ class TestFuncs(unittest.TestCase):
         self.assertEquals(
             resp,
             headers_to_object_info(headers.items(), 200))
+
+    def test_range_fast_forward(self):
+        req = Request.blank('/')
+        handler = GetOrHeadHandler(None, req, None, None, None, None, {})
+        handler.fast_forward(50)
+        self.assertEquals(handler.backend_headers['Range'], 'bytes=50-')
+
+        handler = GetOrHeadHandler(None, req, None, None, None, None,
+                                   {'Range': 'bytes=23-50'})
+        handler.fast_forward(20)
+        self.assertEquals(handler.backend_headers['Range'], 'bytes=43-50')
+        self.assertRaises(HTTPException,
+                          handler.fast_forward, 80)

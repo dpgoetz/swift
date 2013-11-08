@@ -537,7 +537,6 @@ class ObjectController(Controller):
         resp = self.GETorHEAD_base(
             req, _('Object'), self.app.object_ring, partition, req.path_info)
 
-        print 'iiiii: %s' % resp.status
         if ';' in resp.headers.get('content-type', ''):
             # strip off swift_bytes from content-type
             content_type, check_extra_meta = \
@@ -834,7 +833,7 @@ class ObjectController(Controller):
                     conn.node = node
                     return conn
                 elif resp.status == HTTP_INSUFFICIENT_STORAGE:
-                    self.error_limit(node, _('ERROR Insufficient Storage'))
+                    self.app.error_limit(node, _('ERROR Insufficient Storage'))
             except (Exception, Timeout):
                 self.app.exception_occurred(
                     node, _('Object'),
@@ -845,7 +844,6 @@ class ObjectController(Controller):
     @delay_denial
     def PUT(self, req):
         """HTTP PUT request handler."""
-#        print 'aaaa'
         container_info = self.container_info(
             self.account_name, self.container_name, req)
         container_partition = container_info['partition']
@@ -880,7 +878,6 @@ class ObjectController(Controller):
         partition, nodes = self.app.object_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
         # do a HEAD request for container sync and checking object versions
-#        print 'bbbb'
         if 'x-timestamp' in req.headers or \
                 (object_versions and not
                  req.environ.get('swift_versioned_copy')):
@@ -890,7 +887,6 @@ class ObjectController(Controller):
                 hreq, _('Object'), self.app.object_ring, partition,
                 hreq.path_info)
         # Used by container sync feature
-#        print 'fffff'
         if 'x-timestamp' in req.headers:
             try:
                 req.headers['X-Timestamp'] = \
@@ -921,7 +917,6 @@ class ObjectController(Controller):
 
         error_response = check_object_creation(req, self.object_name) or \
             check_content_type(req)
-#        print 'eeee'
         if error_response:
             return error_response
         if object_versions and not req.environ.get('swift_versioned_copy'):
@@ -961,7 +956,6 @@ class ObjectController(Controller):
         data_source = iter(lambda: reader(self.app.client_chunk_size), '')
         source_header = req.headers.get('X-Copy-From')
         source_resp = None
-#        print 'ddddd'
         if source_header:
             if req.environ.get('swift.orig_req_method', req.method) != 'POST':
                 req.environ.setdefault('swift.log_info', []).append(
@@ -1045,7 +1039,6 @@ class ObjectController(Controller):
         else:
             delete_at_container = delete_at_part = delete_at_nodes = None
 
-#        print 'ccccc'
         node_iter = GreenthreadSafeIterator(
             self.iter_nodes_local_first(self.app.object_ring, partition))
         pile = GreenPile(len(nodes))
