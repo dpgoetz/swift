@@ -17,6 +17,7 @@ import errno
 import os
 import mock
 import unittest
+from contextlib import nested
 from tempfile import mkdtemp
 from shutil import rmtree
 from StringIO import StringIO
@@ -24,9 +25,10 @@ from StringIO import StringIO
 import simplejson
 import xml.dom.minidom
 
-from swift.common.swob import Request
+from swift.common.swob import Request, Response
 from swift.account.server import AccountController, ACCOUNT_LISTING_LIMIT
-from swift.common.utils import normalize_timestamp, replication, public
+from swift.common.utils import (normalize_timestamp, replication, public, json,
+                                register_swift_info)
 from swift.common.request_helpers import get_sys_meta_prefix
 
 
@@ -1633,6 +1635,56 @@ class TestAccountController(unittest.TestCase):
             mock_method.replication = True
             response = self.controller.__call__(env, start_response)
             self.assertEqual(response, answer)
+
+    def test_GET_info(self):
+        with nested(mock.patch.dict('swift.common.utils._swift_info',
+                                    clear=True),
+                    mock.patch.dict('swift.common.utils._swift_admin_info',
+                                    clear=True)):
+            controller = AccountController(
+                {'devices': self.testdir, 'mount_check': 'false'})
+
+            register_swift_info('foo', bar='baz')
+            register_swift_info('qux', admin=True, quux='corge')
+
+            path = '/info'
+            req = Request.blank(
+                path, environ={'REQUEST_METHOD': 'GET'})
+            resp = req.get_response(controller)
+
+        self.assertTrue(isinstance(resp, Response))
+        self.assertEqual('200 OK', resp.status)
+
+        info = json.loads(resp.body)
+        self.assertTrue('foo' in info)
+        self.assertTrue('bar' in info['foo'])
+        self.assertEqual(info['foo']['bar'], 'baz')
+        self.assertTrue('admin' in info)
+        self.assertTrue('qux' in info['admin'])
+        self.assertTrue('quux' in info['admin']['qux'])
+        self.assertEqual(info['admin']['qux']['quux'], 'corge')
+
+    def test_HEAD_info(self):
+        path = '/info'
+        req = Request.blank(
+            path, environ={'REQUEST_METHOD': 'HEAD'})
+        resp = req.get_response(self.controller)
+
+        self.assertTrue(isinstance(resp, Response))
+        self.assertEqual('200 OK', resp.status)
+        self.assertEqual('', resp.body)
+
+    def test_info_unsupported_methods(self):
+        for method in ['OPTIONS', 'PUT', 'POST', 'DELETE', 'COPY']:
+            path = '/info'
+            req = Request.blank(
+                path, environ={'REQUEST_METHOD': method})
+            resp = req.get_response(self.controller)
+
+            self.assertTrue(isinstance(resp, Response))
+            self.assertEqual('405 Method Not Allowed', resp.status)
+            self.assertTrue('Method Not Allowed' in resp.body)
+
 
 if __name__ == '__main__':
     unittest.main()

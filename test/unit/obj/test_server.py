@@ -22,6 +22,7 @@ import os
 import mock
 import unittest
 import math
+from contextlib import nested
 from shutil import rmtree
 from StringIO import StringIO
 from time import gmtime, strftime, time
@@ -38,9 +39,10 @@ from swift.obj import server as object_server
 from swift.obj import diskfile
 from swift.common import utils
 from swift.common.utils import hash_path, mkdirs, normalize_timestamp, \
-    NullLogger, storage_directory, public, replication
+    NullLogger, storage_directory, public, replication, json, \
+    register_swift_info
 from swift.common import constraints
-from swift.common.swob import Request, HeaderKeyDict
+from swift.common.swob import Request, Response, HeaderKeyDict
 from swift.common.exceptions import DiskFileDeviceUnavailable
 
 
@@ -3371,6 +3373,58 @@ class TestObjectController(unittest.TestCase):
                     ms.assert_called_with(9)
                     self.assertEqual(
                         self.object_controller.logger.log_dict['info'], [])
+
+    @mock.patch.dict('swift.common.utils._swift_info', {'foo': {'bar': 'baz'}})
+    @mock.patch.dict('swift.common.utils._swift_admin_info',
+                     {'qux': {'quux': 'corge'}})
+    def test_GET_info(self):
+        with nested(mock.patch.dict('swift.common.utils._swift_info',
+                                    clear=True),
+                    mock.patch.dict('swift.common.utils._swift_admin_info',
+                                    clear=True)):
+            controller = object_server.ObjectController(
+                {'devices': self.testdir, 'mount_check': 'false'})
+
+            register_swift_info('foo', bar='baz')
+            register_swift_info('qux', admin=True, quux='corge')
+
+            path = '/info'
+            req = Request.blank(
+                path, environ={'REQUEST_METHOD': 'GET'})
+            resp = req.get_response(controller)
+
+        self.assertTrue(isinstance(resp, Response))
+        self.assertEqual('200 OK', resp.status)
+
+        info = json.loads(resp.body)
+        self.assertTrue('foo' in info)
+        self.assertTrue('bar' in info['foo'])
+        self.assertEqual(info['foo']['bar'], 'baz')
+        self.assertTrue('admin' in info)
+        self.assertTrue('qux' in info['admin'])
+        self.assertTrue('quux' in info['admin']['qux'])
+        self.assertEqual(info['admin']['qux']['quux'], 'corge')
+
+    def test_HEAD_info(self):
+        path = '/info'
+        req = Request.blank(
+            path, environ={'REQUEST_METHOD': 'HEAD'})
+        resp = req.get_response(self.object_controller)
+
+        self.assertTrue(isinstance(resp, Response))
+        self.assertEqual('200 OK', resp.status)
+        self.assertEqual('', resp.body)
+
+    def test_info_unsupported_methods(self):
+        for method in ['OPTIONS', 'PUT', 'POST', 'DELETE', 'COPY']:
+            path = '/info'
+            req = Request.blank(
+                path, environ={'REQUEST_METHOD': method})
+            resp = req.get_response(self.object_controller)
+
+            self.assertTrue(isinstance(resp, Response))
+            self.assertEqual('405 Method Not Allowed', resp.status)
+            self.assertTrue('Method Not Allowed' in resp.body)
 
 
 if __name__ == '__main__':

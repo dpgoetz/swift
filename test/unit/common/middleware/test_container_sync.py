@@ -19,19 +19,27 @@ import shutil
 import tempfile
 import unittest
 import uuid
+from mock import Mock, patch
 
+from swift import __canonical_version__ as swift_version
 from swift.common import swob
 from swift.common.middleware import container_sync
 from swift.proxy.controllers.base import _get_cache_key
 from swift.proxy.controllers.info import InfoController
+from swift.proxy.server import Application as ProxyApp
+from test.unit import FakeRing, fake_http_connect
 
 
 class FakeApp(object):
 
     def __call__(self, env, start_response):
         if env.get('PATH_INFO') == '/info':
+            app = Mock(spec=ProxyApp)
+            app.account_ring = FakeRing()
+            app.container_ring = FakeRing()
+            app.object_ring = FakeRing()
             controller = InfoController(
-                app=None, version=None, expose_info=True,
+                app=app, version=None, expose_info=True,
                 disallowed_sections=[], admin_key=None)
             handler = getattr(controller, env.get('REQUEST_METHOD'))
             return handler(swob.Request(env))(env, start_response)
@@ -151,8 +159,11 @@ cluster_dfw1 = http://dfw1.host/v1/
             req.environ.get('swift.log_info'))
 
     def test_info(self):
-        req = swob.Request.blank('/info')
-        resp = req.get_response(self.sync)
+        with patch('swift.proxy.controllers.info.http_connect_raw',
+                   fake_http_connect(200, 200, 200, body=json.dumps(
+                       {'swift': {'version': swift_version}}))):
+            req = swob.Request.blank('/info')
+            resp = req.get_response(self.sync)
         self.assertEqual(resp.status, '200 OK')
         result = json.loads(resp.body)
         self.assertEqual(
@@ -160,8 +171,11 @@ cluster_dfw1 = http://dfw1.host/v1/
             {'realms': {'US': {'clusters': {'DFW1': {}}}}})
 
     def test_info_always_fresh(self):
-        req = swob.Request.blank('/info')
-        resp = req.get_response(self.sync)
+        with patch('swift.proxy.controllers.info.http_connect_raw',
+                   fake_http_connect(200, 200, 200, body=json.dumps(
+                       {'swift': {'version': swift_version}}))):
+            req = swob.Request.blank('/info')
+            resp = req.get_response(self.sync)
         self.assertEqual(resp.status, '200 OK')
         result = json.loads(resp.body)
         self.assertEqual(
@@ -181,8 +195,11 @@ key = 400b3b357a80413f9d956badff1d9dfe
 cluster_lon3 = http://lon3.host/v1/
             ''')
         self.sync.realms_conf.reload()
-        req = swob.Request.blank('/info')
-        resp = req.get_response(self.sync)
+        with patch('swift.proxy.controllers.info.http_connect_raw',
+                   fake_http_connect(200, 200, 200, body=json.dumps(
+                       {'swift': {'version': swift_version}}))):
+            req = swob.Request.blank('/info')
+            resp = req.get_response(self.sync)
         self.assertEqual(resp.status, '200 OK')
         result = json.loads(resp.body)
         self.assertEqual(
@@ -222,8 +239,11 @@ cluster_lon3 = http://lon3.host/v1/
         self.assertEqual(sync.conf, {
             'global': 'global_value', 'swift_dir': unique,
             'local': 'local_value'})
-        req = swob.Request.blank('/info')
-        resp = req.get_response(sync)
+        with patch('swift.proxy.controllers.info.http_connect_raw',
+                   fake_http_connect(200, 200, 200, body=json.dumps(
+                       {'swift': {'version': swift_version}}))):
+            req = swob.Request.blank('/info')
+            resp = req.get_response(sync)
         self.assertEqual(resp.status, '200 OK')
         result = json.loads(resp.body)
         self.assertEqual(result.get('container_sync'), {'realms': {}})

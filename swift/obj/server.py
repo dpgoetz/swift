@@ -28,8 +28,10 @@ from hashlib import md5
 
 from eventlet import sleep, Timeout
 
+from swift import __canonical_version__ as swift_version
 from swift.common.utils import public, get_logger, \
-    config_true_value, timing_stats, replication, normalize_delete_at_timestamp
+    config_true_value, timing_stats, replication, register_swift_info, \
+    get_swift_info, json, normalize_delete_at_timestamp
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, \
     check_float, check_utf8
@@ -44,7 +46,7 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
     HTTPPreconditionFailed, HTTPRequestTimeout, HTTPUnprocessableEntity, \
     HTTPClientDisconnect, HTTPMethodNotAllowed, Request, Response, UTC, \
     HTTPInsufficientStorage, HTTPForbidden, HTTPException, HeaderKeyDict, \
-    HTTPConflict
+    HTTPConflict, HTTPOk
 from swift.obj.diskfile import DATAFILE_SYSTEM_META, DiskFileManager
 
 
@@ -113,6 +115,11 @@ class ObjectController(object):
 
         # Provide further setup sepecific to an object server implemenation.
         self.setup(conf)
+        register_swift_info(version=swift_version)
+        register_swift_info('swift',
+                            object_allowed_headers=[
+                            d for d in self.allowed_headers] +
+                            ['x-object-meta-*'])
 
     def setup(self, conf):
         """
@@ -655,6 +662,21 @@ class ObjectController(object):
 
         if not check_utf8(req.path_info):
             res = HTTPPreconditionFailed(body='Invalid UTF8 or contains NULL')
+        elif req.path == '/info':
+            info = json.dumps(get_swift_info(admin=True))
+            if req.method == 'GET':
+                res = HTTPOk(request=req,
+                             headers={},
+                             body=info,
+                             content_type='application/json; charset=UTF-8')
+            elif req.method == 'HEAD':
+                res = HTTPOk(request=req,
+                             headers={},
+                             body='',
+                             content_length=len(info),
+                             content_type='application/json; charset=UTF-8')
+            else:
+                res = HTTPMethodNotAllowed()
         else:
             try:
                 # disallow methods which have not been marked 'public'

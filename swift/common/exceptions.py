@@ -131,6 +131,10 @@ class ReplicationException(Exception):
     pass
 
 
+class ExtraSwiftInfoError(SwiftException):
+    pass
+
+
 class ReplicationLockTimeout(LockTimeout):
     pass
 

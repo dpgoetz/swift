@@ -1834,6 +1834,36 @@ class TestSwiftInfo(unittest.TestCase):
         utils._swift_info = {}
         utils._swift_admin_info = {}
 
+    def test_update_swift_info(self):
+        utils._swift_info = {'foo': {'foo1': 'bar1'}}
+        utils._swift_admin_info = {'bar': {'bar1': 'foo1'}}
+
+        utils.update_swift_info({'foo': {'foo2': 'bar2'},
+                                 'admin': {'bar': {'bar2': 'foo2'}}})
+
+        self.assertTrue('foo' in utils._swift_info)
+        self.assertTrue('foo1' in utils._swift_info['foo'])
+        self.assertTrue('foo2' in utils._swift_info['foo'])
+        self.assertTrue('admin' not in utils._swift_info)
+        self.assertTrue('bar' in utils._swift_admin_info)
+        self.assertTrue('bar1' in utils._swift_admin_info['bar'])
+        self.assertTrue('bar2' in utils._swift_admin_info['bar'])
+
+    def test_update_swift_info_with_duplicate_key_raises_exception(self):
+        utils._swift_info = {'foo': {'foo1': 'bar1'}}
+        utils._swift_admin_info = {'bar': {'bar1': 'foo1'}}
+
+        utils.update_swift_info({'foo': {'foo2': 'bar2'},
+                                 'admin': {'bar': {'bar2': 'foo2'}}})
+
+        self.assertTrue('foo' in utils._swift_info)
+        self.assertTrue('foo1' in utils._swift_info['foo'])
+        self.assertTrue('foo2' in utils._swift_info['foo'])
+        self.assertTrue('admin' not in utils._swift_info)
+        self.assertTrue('bar' in utils._swift_admin_info)
+        self.assertTrue('bar1' in utils._swift_admin_info['bar'])
+        self.assertTrue('bar2' in utils._swift_admin_info['bar'])
+
     def test_register_swift_info(self):
         utils.register_swift_info(foo='bar')
         utils.register_swift_info(lorem='ipsum')
