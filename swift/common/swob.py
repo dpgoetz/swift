@@ -1190,7 +1190,9 @@ class Response(object):
             self.request = Request(env)
         self.environ = env
         app_iter = self._response_iter(self.app_iter, self._body)
-        if 'location' in self.headers:
+#TODO: remember to get rid of this when patch lands !!!!!
+        if 'location' in self.headers and \
+                not env.get('swift.leave_relative_location'):
             self.location = self.absolute_location()
         start_response(self.status, self.headers.items())
         return app_iter
