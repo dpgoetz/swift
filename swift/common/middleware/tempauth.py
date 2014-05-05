@@ -260,6 +260,8 @@ class TempAuth(object):
                   of. The first group in the list is also considered a unique
                   identifier for that user.
         """
+        if env.get('swift.cache_authentication') and env.get('REMOTE_USER'):
+            return env['REMOTE_USER']
         groups = None
         memcache_client = cache_from_env(env)
         if not memcache_client:

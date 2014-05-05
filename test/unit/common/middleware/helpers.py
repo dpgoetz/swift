@@ -43,7 +43,8 @@ class FakeSwift(object):
             path += '?' + env['QUERY_STRING']
 
         if 'swift.authorize' in env:
-            resp = env['swift.authorize']()
+            req = swob.Request(env)
+            resp = env['swift.authorize'](req)
             if resp:
                 return resp(env, start_response)
 

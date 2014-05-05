@@ -751,6 +751,12 @@ class TestSloGetManifest(SloTestCase):
              {'name': '/gettest/c_15', 'hash': md5hex('c' * 15), 'bytes': '15',
               'content_type': 'text/plain'}])
 
+        _bc_noauth_manifest_json = json.dumps(
+            [{'name': '/gettest/b_10', 'hash': md5hex('b' * 10), 'bytes': '10',
+              'content_type': 'text/plain'},
+             {'name': '/noauth/c_15', 'hash': md5hex('c' * 15), 'bytes': '15',
+              'content_type': 'text/plain'}])
+
         # some plain old objects
         self.app.register(
             'GET', '/v1/AUTH_test/gettest/a_5',
@@ -774,12 +780,26 @@ class TestSloGetManifest(SloTestCase):
             'd' * 20)
 
         self.app.register(
+            'GET', '/v1/AUTH_test/noauth/c_15',
+            swob.HTTPOk, {'Content-Length': '15',
+                          'Etag': md5hex('c' * 15)},
+            'c' * 15)
+
+        self.app.register(
             'GET', '/v1/AUTH_test/gettest/manifest-bc',
             swob.HTTPOk, {'Content-Type': 'application/json;swift_bytes=25',
                           'X-Static-Large-Object': 'true',
                           'X-Object-Meta-Plant': 'Ficus',
                           'Etag': md5hex(_bc_manifest_json)},
             _bc_manifest_json)
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/authtest/manifest-bc',
+            swob.HTTPOk, {'Content-Type': 'application/json;swift_bytes=25',
+                          'X-Static-Large-Object': 'true',
+                          'X-Object-Meta-Plant': 'Ficus',
+                          'Etag': md5hex(_bc_noauth_manifest_json)},
+            _bc_noauth_manifest_json)
 
         _abcd_manifest_json = json.dumps(
             [{'name': '/gettest/a_5', 'hash': md5hex("a" * 5),
@@ -1361,6 +1381,48 @@ class TestSloGetManifest(SloTestCase):
         self.assertTrue(isinstance(exc, ListingIterError))
         self.assertEqual('200 OK', status)
         self.assertEqual(body, ' ')
+
+    def test_token_times_out_during_get(self):
+
+        auth_called = [0]
+
+        def my_auth(req):
+            auth_called[0] += 1
+            if auth_called[0] > 2:
+                return swob.HTTPUnauthorized()
+            return None
+
+        req = Request.blank(
+            '/v1/AUTH_test/gettest/manifest-bc',
+            environ={'REQUEST_METHOD': 'GET', 'swift.authorize': my_auth})
+        status, headers, body = self.call_slo(req)
+        headers = swob.HeaderKeyDict(headers)
+
+        self.assertEqual(status, '200 OK')
+        self.assertEqual(
+            body, 'bbbbbbbbbbccccccccccccccc')
+
+    def test_unauth_to_second_container(self):
+
+        def my_auth(req):
+            if 'noauth' in req.path:
+                return swob.HTTPUnauthorized()
+            return None
+
+        req = Request.blank(
+            '/v1/AUTH_test/authtest/manifest-bc',
+            environ={'REQUEST_METHOD': 'GET', 'swift.authorize': my_auth})
+        status, headers, body, exc = self.call_slo(req, expect_exception=True)
+
+        self.assertTrue(isinstance(exc, SegmentError))
+        self.assertTrue('got 401 while retrieving /v1/AUTH_test/noauth/c_15'
+                        in str(exc))
+        self.assertEqual('200 OK', status)
+        headers = swob.HeaderKeyDict(headers)
+
+        self.assertEqual(status, '200 OK')
+        self.assertEqual(
+            body, 'bbbbbbbbbb')
 
     def test_invalid_json_submanifest(self):
         self.app.register(

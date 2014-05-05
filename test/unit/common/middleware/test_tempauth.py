@@ -802,6 +802,14 @@ class TestAuth(unittest.TestCase):
         groups = ath._get_user_groups('test', 'test:tester', 'AUTH_test')
         self.assertEquals(groups, 'test,test:tester')
 
+    def test_get_groups_cached(self):
+        app = FakeApp()
+        ath = auth.filter_factory({})(app)
+        self.assertEquals(ath.get_groups(
+            {'swift.cache_authentication': True,
+             'REMOTE_USER': 'user'},
+            'abcdefg'), 'user')
+
     def test_auth_scheme(self):
         req = self._make_request('/v1/BLAH_account',
                                  headers={'X-Auth-Token': 'BLAH_t'})

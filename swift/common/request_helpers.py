@@ -30,7 +30,7 @@ from swift.common.exceptions import ListingIterError, SegmentError
 from swift.common.http import is_success, HTTP_SERVICE_UNAVAILABLE
 from swift.common.swob import HTTPBadRequest, HTTPNotAcceptable
 from swift.common.utils import split_path, validate_device_partition
-from swift.common.wsgi import make_subrequest
+from swift.common.wsgi import make_subrequest, make_pre_authed_request
 
 
 def get_param(req, name, default=None):
@@ -254,6 +254,7 @@ class SegmentedIterable(object):
         self.swift_source = swift_source
         self.name = name
         self.response = response
+        self.segment_containers = set()
 
     def app_iter_range(self, *a, **kw):
         """
@@ -285,7 +286,22 @@ class SegmentedIterable(object):
                 # Make sure that the segment is a plain old object, not some
                 # flavor of large object, so that we can check its MD5.
                 path = seg_path + '?multipart-manifest=get'
-                seg_req = make_subrequest(
+
+                # Only auth once per container. This will help prevent token
+                # timeouts from stopping the xLO download. It assumes that if
+                # the client has access to one object in a container then he
+                # has access to all of them.
+                subrequest_function = make_subrequest
+                try:
+                    vrs, acc, cont, obj = split_path(seg_path, 1, 4, True)
+                    if cont in self.segment_containers:
+                        subrequest_function = make_pre_authed_request
+                    else:
+                        self.segment_containers.add(cont)
+                except ValueError:
+                    pass
+
+                seg_req = subrequest_function(
                     self.req.environ, path=path, method='GET',
                     headers={'x-auth-token': self.req.headers.get(
                         'x-auth-token')},

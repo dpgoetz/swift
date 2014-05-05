@@ -349,6 +349,7 @@ class SloGetContext(WSGIContext):
                     what may be a static large object manifest (or may not).
         :param start_response: WSGI start_response callable
         """
+        req.environ['swift.cache_authentication'] = True
         resp_iter = self._app_call(req.environ)
 
         # make sure this response is for a static large object manifest
