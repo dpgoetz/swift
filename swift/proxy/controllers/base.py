@@ -676,6 +676,7 @@ class GetOrHeadHandler(object):
                         nchunks += 1
                         bytes_read_from_source += len(chunk)
                 except ChunkReadTimeout:
+                    self.app.error_limiter.report_timeout(node)
                     exc_type, exc_value, exc_traceback = exc_info()
                     if self.newest or self.server_type != 'Object':
                         raise exc_type, exc_value, exc_traceback
@@ -719,6 +720,7 @@ class GetOrHeadHandler(object):
                     sleep()
 
         except ChunkReadTimeout:
+            # timeout was reported above
             self.app.exception_occurred(node, _('Object'),
                                         _('Trying to read during GET'))
             raise
@@ -766,6 +768,7 @@ class GetOrHeadHandler(object):
                     # See NOTE: swift_conn at top of file about this.
                     possible_source.swift_conn = conn
             except (Exception, Timeout):
+                self.app.error_limiter.report_timeout(node)
                 self.app.exception_occurred(
                     node, self.server_type,
                     _('Trying to %(method)s %(path)s') %
@@ -1027,6 +1030,7 @@ class Controller(object):
                         self.app.error_limit(node,
                                              _('ERROR Insufficient Storage'))
             except (Exception, Timeout):
+                self.app.error_limiter.report_timeout(node)
                 self.app.exception_occurred(
                     node, self.server_type,
                     _('Trying to %(method)s %(path)s') %

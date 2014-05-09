@@ -391,6 +391,7 @@ class ObjectController(Controller):
                 elif resp.status == HTTP_INSUFFICIENT_STORAGE:
                     self.app.error_limit(node, _('ERROR Insufficient Storage'))
             except (Exception, Timeout):
+                self.app.error_limiter.report_timeout(node)
                 self.app.exception_occurred(
                     node, _('Object'),
                     _('Expect: 100-continue on %s') % path)
@@ -409,6 +410,7 @@ class ObjectController(Controller):
                     else:
                         return conn.getresponse()
             except (Exception, Timeout):
+                self.app.error_limiter.report_timeout(node)
                 self.app.exception_occurred(
                     conn.node, _('Object'),
                     _('Trying to get final status of PUT to %s') % req.path)

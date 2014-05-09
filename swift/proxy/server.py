@@ -17,7 +17,7 @@ import mimetypes
 import os
 import socket
 from swift import gettext_ as _
-from random import shuffle
+from random import shuffle, random
 from time import time
 import itertools
 
@@ -208,6 +208,12 @@ class Application(object):
             strict_cors_mode=self.strict_cors_mode,
             **constraints.EFFECTIVE_CONSTRAINTS)
 
+        self.error_limiter = ErrorLimitPoller(
+            int(conf.get('error_limit_window', 100)),
+            float(conf.get('error_limit_ignore_ratio', 0.1)),
+            self.logger)
+
+
     def check_config(self):
         """
         Check the configuration for possible errors
@@ -386,13 +392,17 @@ class Application(object):
         timing = round(timing, 3)  # sort timings to the millisecond
         self.node_timings[node['ip']] = (timing, now + self.timing_expiry)
 
-    def error_limited(self, node):
+    def error_limited(self, node, validate_only=False):
         """
         Check if the node is currently error limited.
 
         :param node: dictionary of node to check
+        :param validate_only: do not count this function call as a
+                              "hit" to that node
         :returns: True if error limited, False otherwise
         """
+        if not validate_only and self.error_limiter.is_error_limited(node):
+            return True
         now = time()
         if 'errors' not in node:
             return False
@@ -472,7 +482,7 @@ class Application(object):
         for node in primary_nodes:
             if not self.error_limited(node):
                 yield node
-                if not self.error_limited(node):
+                if not self.error_limited(node, validate_only=True):
                     nodes_left -= 1
                     if nodes_left <= 0:
                         return
@@ -487,7 +497,7 @@ class Application(object):
                     if handoffs == len(primary_nodes):
                         self.logger.increment('handoff_all_count')
                 yield node
-                if not self.error_limited(node):
+                if not self.error_limited(node, validate_only=True):
                     nodes_left -= 1
                     if nodes_left <= 0:
                         return
