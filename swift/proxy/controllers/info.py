@@ -17,13 +17,15 @@ from hashlib import md5
 from time import time
 
 from swift import __canonical_version__ as swift_version
+from eventlet.timeout import Timeout
 from swift.common.bufferedhttp import http_connect_raw
-from swift.common.constraints import MAX_EXTENDED_SWIFT_INFO_ATTEMPTS
-from swift.common.exceptions import ExtraSwiftInfoError
+from swift.common.exceptions import ConnectionTimeout
 from swift.common.utils import public, get_hmac, get_swift_info, json, \
-    streq_const_time, update_swift_info
+    streq_const_time, register_swift_info
+from swift.common.http import is_success
 from swift.proxy.controllers.base import Controller, delay_denial
-from swift.common.swob import HTTPOk, HTTPForbidden, HTTPUnauthorized
+from swift.common.swob import HTTPOk, HTTPForbidden, HTTPUnauthorized, \
+    HTTPServerError
 
 _extended_info = False
 
@@ -57,90 +59,29 @@ class InfoController(Controller):
     def OPTIONS(self, req):
         return HTTPOk(request=req, headers={'Allow': 'HEAD, GET, OPTIONS'})
 
-    def get_node_info(self, ring):
+    def populate_object_info(self):
         """
-        Retrieves swift info from a random node in the ring provided.
+        Retrieves swift info from a random object node.
 
-        If errors occur attempting to retrieve info from a node, a new
-        node will be selected.  It will continue like this until either it
-        finds a node which has a matching swift version, or until it has
-        tried MAX_EXTENDED_SWIFT_INFO_ATTEMPTS times.
-
-        :param ring: Ring to be used for the random selection of nodes.
-        :returns: tuple of (ip, port, resp, info)
-
-        :raises: ExtraSwiftInfoError if MAX_EXTENDED_SWIFT_INFO_ATTEMPTS is
-                 exceeded without getting valid info back.
+        :raises: ExtraSwiftInfoError object server call fails
+        :raises: ValueError if returns bad json
         """
-        errors = []
-        for x in xrange(MAX_EXTENDED_SWIFT_INFO_ATTEMPTS):
-            seed = md5(str(time())).hexdigest()
-            (partition, nodes) = ring.get_nodes(seed)
-            ip = nodes[0]['ip']
-            port = nodes[0]['port']
-
-            conn = http_connect_raw(ip, port, 'GET', '/info')
-            resp = conn.getresponse()
-
-            data = resp.read()
+        seed = md5(str(time())).hexdigest()
+        partition, nodes = self.app.object_ring.get_nodes(seed)
+        object_server_info = 'NOT_IMPLEMENTED'
+        for node in nodes:
             try:
-                info = json.loads(data)
-            except (TypeError, ValueError):
-                errors.append({'ip': ip, 'port': port, 'msg': 'invalid json'})
-                continue
-
-            if resp.status != 200:
-                errors.append({'ip': ip, 'port': port,
-                               'msg': 'status: {0}'.format(resp.status)})
-                continue
-
-            node_version = None
-            try:
-                node_version = info['swift'].pop('version')
-            except KeyError:
+                with ConnectionTimeout(self.app.conn_timeout):
+                    conn = http_connect_raw(
+                        node['ip'], node['port'], 'GET', '/info')
+                    resp = conn.getresponse()
+                    if is_success(resp.status):
+                        object_server_info = json.loads(resp.read())
+                        break
+            except (Exception, Timeout):
                 pass
 
-            if swift_version != node_version:
-                errors.append({
-                    'ip': ip, 'port': port,
-                    'msg': ('proxy version ({0}) does not match '
-                            'node version ({1})').format(
-                    swift_version, node_version)})
-                continue
-
-            return (ip, port, resp, info)
-
-        raise ExtraSwiftInfoError('/n'.join(
-            ['ip: {0} | port: {1} | msg: {2}'.format(
-                x['ip'], x['port'], x['msg']) for x in errors]))
-
-    def load_extended_swift_info(self):
-        """
-        Retrieves swift info from a account, container and object server, then
-        adds it to the proxy's swift info.
-
-        Subsequent calls will return as, the extended info has already been
-        merged in with the proxies swift info.
-
-        :raises: ExtraSwiftInfoError (thrown by get_node_info) if valid
-                 swift info can not be found in the ring provided.
-        """
-        global _extended_info
-        if _extended_info:
-            return
-
-        data = []
-        for ring in [self.app.account_ring,
-                     self.app.container_ring,
-                     self.app.object_ring]:
-            (ip, port, resp, info) = self.get_node_info(ring)
-
-            data.append({'ip': ip, 'port': port, 'resp': resp, 'info': info})
-
-        for d in data:
-            update_swift_info(d['info'])
-
-        _extended_info = True
+        register_swift_info('backend', object_server=object_server_info)
 
     def GETorHEAD(self, req):
         """
@@ -152,7 +93,8 @@ class InfoController(Controller):
         if not self.expose_info:
             return HTTPForbidden(request=req)
 
-        self.load_extended_swift_info()
+        if 'backend' not in get_swift_info():
+            self.populate_object_info()
 
         admin_request = False
         sig = req.params.get('swiftinfo_sig', '')

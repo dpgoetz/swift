@@ -23,7 +23,6 @@ from xml.etree.cElementTree import Element, SubElement, tostring
 from eventlet import Timeout
 
 import swift.common.db
-from swift import __canonical_version__ as swift_version
 from swift.container.backend import ContainerBroker
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.container_sync_realms import ContainerSyncRealms
@@ -32,7 +31,7 @@ from swift.common.request_helpers import get_param, get_listing_content_type, \
 from swift.common.utils import get_logger, hash_path, public, \
     normalize_timestamp, storage_directory, validate_sync_to, \
     config_true_value, json, timing_stats, replication, \
-    override_bytes_from_content_type, register_swift_info, get_swift_info
+    override_bytes_from_content_type
 from swift.common.constraints import CONTAINER_LISTING_LIMIT, \
     check_mount, check_float, check_utf8
 from swift.common.bufferedhttp import http_connect
@@ -42,7 +41,7 @@ from swift.common.http import HTTP_NOT_FOUND, is_success
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
     HTTPCreated, HTTPInternalServerError, HTTPNoContent, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPMethodNotAllowed, Request, Response, \
-    HTTPInsufficientStorage, HTTPException, HeaderKeyDict, HTTPOk
+    HTTPInsufficientStorage, HTTPException, HeaderKeyDict
 
 DATADIR = 'containers'
 
@@ -82,13 +81,9 @@ class ContainerController(object):
         self.auto_create_account_prefix = \
             conf.get('auto_create_account_prefix') or '.'
         if config_true_value(conf.get('allow_versions', 'f')):
-            register_swift_info('object_versioning')
             self.save_headers.append('x-versions-location')
         swift.common.db.DB_PREALLOCATION = \
             config_true_value(conf.get('db_preallocation', 'f'))
-        register_swift_info(version=swift_version)
-        register_swift_info('swift',
-                            container_allowed_headers=['x-container-meta-*'])
 
     def _get_container_broker(self, drive, part, account, container, **kwargs):
         """
@@ -484,21 +479,6 @@ class ContainerController(object):
         self.logger.txn_id = req.headers.get('x-trans-id', None)
         if not check_utf8(req.path_info):
             res = HTTPPreconditionFailed(body='Invalid UTF8 or contains NULL')
-        elif req.path == '/info':
-            info = json.dumps(get_swift_info(admin=True))
-            if req.method == 'GET':
-                res = HTTPOk(request=req,
-                             headers={},
-                             body=info,
-                             content_type='application/json; charset=UTF-8')
-            elif req.method == 'HEAD':
-                res = HTTPOk(request=req,
-                             headers={},
-                             body='',
-                             content_length=len(info),
-                             content_type='application/json; charset=UTF-8')
-            else:
-                res = HTTPMethodNotAllowed()
         else:
             try:
                 # disallow methods which have not been marked 'public'

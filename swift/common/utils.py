@@ -149,50 +149,6 @@ _swift_info = {}
 _swift_admin_info = {}
 
 
-def update_swift_info(info):
-    """
-    Merges data from a info call info _swfit_info and _swift_admin_info.
-
-    :param info: dictionary of info.  If the dictionary contains a key for
-                 'admin', the value for the key is removed from info and
-                 the value is added to _swift_admin_info.  The remainder of
-                 info is then merged with _swift_info.
-    """
-    global _swift_info
-    global _swift_admin_info
-
-    if not info:
-        return
-
-    def merge_info(info1, info2):
-        for key in info2.iterkeys():
-            if key in info1:
-                if (isinstance(info1[key], dict) and
-                        isinstance(info2[key], dict)):
-                    merge_info(info1[key], info2[key])
-                elif (isinstance(info1[key], list) and
-                        isinstance(info2[key], list)):
-                    info1[key] = info1[key] + info2[key]
-                else:
-                    raise ValueError('Value for key {0} already exists'.format(
-                        key))
-            else:
-                if isinstance(info2[key], dict):
-                    info1[key] = dict(info2[key])
-                elif isinstance(info2[key], list):
-                    info1[key] = list(info2[key])
-                else:
-                    info1[key] = info2[key]
-
-        return info1
-
-    if 'admin' in info:
-        admin_info = info.pop('admin')
-        _swift_admin_info = merge_info(_swift_admin_info, admin_info)
-
-    _swift_info = merge_info(_swift_info, info)
-
-
 def get_swift_info(admin=False, disallowed_sections=None):
     """
     Returns information about the swift cluster that has been previously

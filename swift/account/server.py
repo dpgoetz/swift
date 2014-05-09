@@ -21,7 +21,6 @@ from swift import gettext_ as _
 from eventlet import Timeout
 
 import swift.common.db
-from swift import __canonical_version__ as swift_version
 from swift.account.backend import AccountBroker
 from swift.account.utils import account_listing_response
 from swift.common.db import DatabaseConnectionError, DatabaseAlreadyExists
@@ -29,7 +28,7 @@ from swift.common.request_helpers import get_param, get_listing_content_type, \
     split_and_validate_path
 from swift.common.utils import get_logger, hash_path, public, \
     normalize_timestamp, storage_directory, config_true_value, \
-    json, timing_stats, replication, register_swift_info, get_swift_info
+    json, timing_stats, replication
 from swift.common.constraints import ACCOUNT_LISTING_LIMIT, \
     check_mount, check_float, check_utf8
 from swift.common.db_replicator import ReplicatorRpc
@@ -37,7 +36,7 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, \
     HTTPCreated, HTTPForbidden, HTTPInternalServerError, \
     HTTPMethodNotAllowed, HTTPNoContent, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPConflict, Request, \
-    HTTPInsufficientStorage, HTTPException, HTTPOk
+    HTTPInsufficientStorage, HTTPException
 from swift.common.request_helpers import is_sys_or_user_meta
 
 
@@ -62,9 +61,6 @@ class AccountController(object):
             conf.get('auto_create_account_prefix') or '.'
         swift.common.db.DB_PREALLOCATION = \
             config_true_value(conf.get('db_preallocation', 'f'))
-        register_swift_info(version=swift_version)
-        register_swift_info('swift',
-                            account_allowed_headers=['x-account-meta-*'])
 
     def _get_account_broker(self, drive, part, account, **kwargs):
         hsh = hash_path(account)
@@ -274,21 +270,6 @@ class AccountController(object):
         self.logger.txn_id = req.headers.get('x-trans-id', None)
         if not check_utf8(req.path_info):
             res = HTTPPreconditionFailed(body='Invalid UTF8 or contains NULL')
-        elif req.path == '/info':
-            info = json.dumps(get_swift_info(admin=True))
-            if req.method == 'GET':
-                res = HTTPOk(request=req,
-                             headers={},
-                             body=info,
-                             content_type='application/json; charset=UTF-8')
-            elif req.method == 'HEAD':
-                res = HTTPOk(request=req,
-                             headers={},
-                             body='',
-                             content_length=len(info),
-                             content_type='application/json; charset=UTF-8')
-            else:
-                res = HTTPMethodNotAllowed()
         else:
             try:
                 # disallow methods which are not publicly accessible

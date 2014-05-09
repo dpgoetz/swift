@@ -117,9 +117,7 @@ class ObjectController(object):
         self.setup(conf)
         register_swift_info(version=swift_version)
         register_swift_info('swift',
-                            object_allowed_headers=[
-                            d for d in self.allowed_headers] +
-                            ['x-object-meta-*'])
+                            object_allowed_headers=list(self.allowed_headers))
 
     def setup(self, conf):
         """
@@ -663,17 +661,14 @@ class ObjectController(object):
         if not check_utf8(req.path_info):
             res = HTTPPreconditionFailed(body='Invalid UTF8 or contains NULL')
         elif req.path == '/info':
-            info = json.dumps(get_swift_info(admin=True))
-            if req.method == 'GET':
+            if req.method in ['GET', 'HEAD']:
+                info = json.dumps(get_swift_info())
+                content_length = len(info)
+                if req.method == 'HEAD':
+                    info = ''
                 res = HTTPOk(request=req,
-                             headers={},
                              body=info,
-                             content_type='application/json; charset=UTF-8')
-            elif req.method == 'HEAD':
-                res = HTTPOk(request=req,
-                             headers={},
-                             body='',
-                             content_length=len(info),
+                             content_length=content_length,
                              content_type='application/json; charset=UTF-8')
             else:
                 res = HTTPMethodNotAllowed()
