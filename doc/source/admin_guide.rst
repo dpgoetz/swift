@@ -995,6 +995,11 @@ Metric Name                               Description
 `proxy-server.<type>.client_disconnects`  Count of detected client disconnects during PUT
                                           operations (does NOT include caught Exceptions in
                                           the proxy-server which caused a client disconnect).
+`proxy-server.limiter_errors`             Count of number of errors recorded in the error
+                                          limiter SQLite databases. These correspond to a/c/o
+                                          server timeouts.
+`proxy-server.limiter_nodes_skipped`      Count of number nodes skipped because of
+                                          error-limiter.
 ========================================  ====================================================
 
 Metrics for `proxy-logging` middleware (in the table, `<type>` is either the

@@ -205,6 +205,11 @@ use = egg:swift#proxy
 # usually indicates administrative responsibilities.
 # swift_owner_headers = x-container-read, x-container-write, x-container-sync-key, x-container-sync-to, x-account-meta-temp-url-key, x-account-meta-temp-url-key-2, x-account-access-control
 
+# To use the adaptive error-limiting feature of the proxy server set this
+# to the path of your error-limiter.conf. Or "default" if you want to run
+# with the default settings. FYI: this feature is EXPERIMENTAL.
+# error_limit_conf_path =
+
 [filter:tempauth]
 use = egg:swift#tempauth
 # You can override the default log routing for this filter here:

@@ -830,6 +830,7 @@ class GetOrHeadHandler(object):
                 (k.lower(), v) for k, v in
                 possible_source.getheaders())
             self.used_source_etag = src_headers.get('etag', '').strip('"')
+            self.app.report_action_to_node(node, 'request')
             return source, node
         return None, None
 
@@ -1016,6 +1017,7 @@ class Controller(object):
         """
         self.app.logger.thread_locals = logger_thread_locals
         for node in nodes:
+            self.app.report_action_to_node(node, 'request')
             try:
                 start_node_timing = time.time()
                 with ConnectionTimeout(self.app.conn_timeout):
