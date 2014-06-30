@@ -32,6 +32,7 @@ from swift.common.utils import cache_from_env, get_logger, \
     affinity_key_function, affinity_locality_predicate, list_from_csv, \
     register_swift_info
 from swift.common.constraints import check_utf8
+from swift.common.error_limiter import ErrorLimiter
 from swift.proxy.controllers import AccountController, ObjectController, \
     ContainerController, InfoController
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
@@ -204,6 +205,13 @@ class Application(object):
         # ** Because it affects the client as well, currently, we use the
         # client chunk size as the govenor and not the object chunk size.
         socket._fileobject.default_bufsize = self.client_chunk_size
+        self.error_limiter = None
+        if 'error_limit_conf_path' in conf:
+            try:
+                self.error_limiter = ErrorLimiter(
+                    conf.get('error_limit_conf_path'), self.logger)
+            except OSError as err:
+                self.logger.error('Could not setup Error Limiter: %s' % err)
         self.expose_info = config_true_value(
             conf.get('expose_info', 'yes'))
         self.disallowed_sections = list_from_csv(
@@ -490,7 +498,14 @@ class Application(object):
         handoff_nodes = node_iter
         nodes_left = self.request_node_count(len(primary_nodes))
 
+        pnodes_kicked = 0
         for node in primary_nodes:
+            if self.error_limiter and \
+                    pnodes_kicked < self.error_limiter.allow_to_kick:
+                if self.error_limiter.is_error_limited(node):
+                    pnodes_kicked += 1
+                    continue
+
             if not self.error_limited(node):
                 yield node
                 if not self.error_limited(node):
@@ -498,7 +513,14 @@ class Application(object):
                     if nodes_left <= 0:
                         return
         handoffs = 0
+        handoffs_kicked = 0
         for node in handoff_nodes:
+            if self.error_limiter and \
+                    handoffs_kicked < self.error_limiter.allow_to_kick:
+                if self.error_limiter.is_error_limited(node):
+                    handoffs_kicked += 1
+                    continue
+
             if not self.error_limited(node):
                 handoffs += 1
                 if self.log_handoffs:
@@ -513,6 +535,10 @@ class Application(object):
                     if nodes_left <= 0:
                         return
 
+    def report_action_to_node(self, node, action):
+        if self.error_limiter:
+            self.error_limiter.record_action(node, action)
+
     def exception_occurred(self, node, typ, additional_info):
         """
         Handle logging of generic exceptions.
@@ -521,6 +547,7 @@ class Application(object):
         :param typ: server type
         :param additional_info: additional information to log
         """
+        self.report_action_to_node(node, 'error')
         self.logger.exception(
             _('ERROR with %(type)s server %(ip)s:%(port)s/%(device)s re: '
               '%(info)s'),

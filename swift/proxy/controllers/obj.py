@@ -374,6 +374,7 @@ class ObjectController(Controller):
         self.app.logger.thread_locals = logger_thread_locals
         for node in nodes:
             try:
+                self.app.report_action_to_node(node, 'request')
                 start_time = time.time()
                 with ConnectionTimeout(self.app.conn_timeout):
                     conn = http_connect(
