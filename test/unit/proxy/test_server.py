@@ -61,6 +61,7 @@ from swift.common import storage_policy
 from swift.common.storage_policy import StoragePolicy, \
     StoragePolicyCollection, POLICIES
 from swift.common.request_helpers import get_sys_meta_prefix
+from swift.common.error_limiter import ErrorLimiter
 
 # mocks
 logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
@@ -2516,6 +2517,53 @@ class TestObjectController(unittest.TestCase):
             got_nodes = list(self.app.iter_nodes(object_ring, 0,
                                                  node_iter=iter(node_list)))
         self.assertEqual(node_list, got_nodes)
+
+    def test_call_error_limiter_in_init(self):
+        def bad_init(*args):
+            raise OSError()
+
+        with mock.patch('os.makedirs', bad_init):
+            app = proxy_server.Application({'error_limit_config': 'default'},
+                                           FakeMemcache(),
+                                           logger=debug_logger('proxy-ut'),
+                                           account_ring=FakeRing(),
+                                           container_ring=FakeRing())
+            self.assertEqual(app.error_limiter, None)
+            app.report_action_to_node({}, 'request')
+
+        with mock.patch(
+                'swift.common.error_limiter.ErrorLimiter.__init__', bad_init):
+            app = proxy_server.Application({'error_limit_config': 'default'},
+                                           FakeMemcache(),
+                                           logger=debug_logger('proxy-ut'),
+                                           account_ring=FakeRing(),
+                                           container_ring=FakeRing())
+            self.assertEqual(app.error_limiter, None)
+
+
+    def test_iter_nodes_skips_at_most_one_error_limiter(self):
+        object_ring = self.app.get_object_ring(None)
+        with mock.patch.object(
+                self.app, 'error_limiter', ErrorLimiter('default')):
+            with mock.patch.object(
+                    self.app.error_limiter,
+                    'is_error_limited', lambda n: True):
+                with mock.patch.object(self.app, 'sort_nodes', lambda n: n):
+                    object_ring = self.app.get_object_ring(None)
+                    itr = self.app.iter_nodes(object_ring, 0)
+                    self.assertEqual(itr.next()['id'], 1)
+
+                self.app.error_limiter.allow_to_kick = 2
+                with mock.patch.object(self.app, 'sort_nodes', lambda n: n):
+                    object_ring = self.app.get_object_ring(None)
+                    itr = self.app.iter_nodes(object_ring, 0)
+                    self.assertEqual(itr.next()['id'], 2)
+
+                self.app.error_limiter.allow_to_kick = 0
+                with mock.patch.object(self.app, 'sort_nodes', lambda n: n):
+                    object_ring = self.app.get_object_ring(None)
+                    itr = self.app.iter_nodes(object_ring, 0)
+                    self.assertEqual(itr.next()['id'], 0)
 
     def test_best_response_sets_headers(self):
         controller = proxy_server.ObjectController(self.app, 'account',
