@@ -1,4 +1,4 @@
-swift (2.0.0.1~rax5) lucid; urgency=medium
+swift (2.0.0.0~rax5) lucid; urgency=medium
 
   * 98bae9d Error limiter try
 
