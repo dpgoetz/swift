@@ -1,0 +1,62 @@
+#!/usr/bin/python
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy
+# of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
+import sys
+from optparse import OptionParser
+from swift.common.error_limiter import ErrorLimiter
+from swift.common.utils import json
+
+
+def show_error_limited_nodes(conf_path, output_format='text'):
+    el = ErrorLimiter(conf_path)
+    data = el.get_current_state()
+    if output_format == 'json':
+        print json.dumps(data)
+        return 0
+    nodes = data.keys()
+    nodes.sort(
+        lambda l, r: cmp(data[r]['numerator'] / data[r]['denominator'],
+                         data[l]['numerator'] / data[l]['denominator']))
+
+    def pr(vals):
+        return ''.join([str(s).rjust(16) for s in vals])
+
+    title = pr(['Node', '# Requests', '# Errors', 'Error Limit %'])
+    print
+    print title
+    print '-' * len(title)
+
+    for node_id in nodes:
+        numerator = data.get(node_id, {}).get('numerator', 0.0)
+        denominator = data.get(node_id, {}).get('denominator', 0.0)
+        num_reqs = data.get(node_id, {}).get('num_reqs', 0)
+        num_errors = data.get(node_id, {}).get('num_errors', 0)
+
+        err_limit = 0
+        if denominator:
+            err_limit = '%.2f%%' % (numerator / denominator * 100)
+        print pr([node_id, num_reqs, num_errors, err_limit])
+
+
+if __name__ == '__main__':
+    parser = OptionParser('$ %prog /etc/swift/error_limiter.conf')
+    parser.add_option('-f', '--format', dest='output_format',
+                      help='Output format text|json. Defaults to text')
+
+    options, args = parser.parse_args()
+
+    if len(args) < 1:
+        sys.exit(parser.print_help())
+
+    sys.exit(
+        show_error_limited_nodes(args[0], output_format=options.output_format))
