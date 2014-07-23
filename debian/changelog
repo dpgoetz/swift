@@ -1,3 +1,7 @@
+swift (2.0.0.0~rax4) lucid; urgency=medium
+
+  * 98bae9d Error limiter try
+
 swift (2.0.0.0~rax3) lucid; urgency=medium
 
   * 0753dd3 Handle func tests of swift cluster that hide /info
