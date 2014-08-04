@@ -78,6 +78,7 @@ setup(
         'bin/swift-recon-cron',
         'bin/swift-ring-builder',
         'bin/swift-temp-url',
+        'bin/swift-error-limits',
     ],
     entry_points={
         'paste.app_factory': [

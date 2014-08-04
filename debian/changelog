@@ -1,3 +1,10 @@
+swift (2.0.0.0~rax7) lucid; urgency=medium
+
+  * 98bae9d Error limiter try
+  * 970c9a6 adding swift-error-limits
+
+ -- David Goetz <david.goetz@rackspace.com>  Mon, 23 Jul 2014 19:13:02 +0000
+
 swift (2.0.0.0~rax3) lucid; urgency=medium
 
   * 0753dd3 Handle func tests of swift cluster that hide /info
