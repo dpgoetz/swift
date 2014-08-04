@@ -1,0 +1,24 @@
+[error_limit]
+# the str format of how the node key is built. Can take
+# any key available from the ring's node dict:
+# ip, port, and device are the most likely candidates
+# error_key = %(ip)s_%(port)s
+#
+# how long until the database is rotated out
+# db_lifetime = 43200
+#
+# how many seconds each window will last
+# window_size = 60
+#
+# num seconds proxy will wait for error limit db to respond. on timeout
+# will not limit node
+# db_timeout = 0.5
+#
+# the number of windows that will be considered in the limiting
+# lookback_windows = 5
+#
+# the maximum error rate (prevents a node from ever being 100% limited)
+# max_error_limit_perc = 0.9
+#
+# number of nodes the proxy is allowed to skip
+# allow_to_kick = 1

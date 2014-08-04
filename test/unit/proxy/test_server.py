@@ -61,6 +61,7 @@ from swift.common import storage_policy
 from swift.common.storage_policy import StoragePolicy, \
     StoragePolicyCollection, POLICIES
 from swift.common.request_helpers import get_sys_meta_prefix
+from swift.common.error_limiter import ErrorLimiter
 
 # mocks
 logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
@@ -268,6 +269,9 @@ def save_globals():
                                 None)
     orig_account_info = getattr(swift.proxy.controllers.Controller,
                                 'account_info', None)
+    orig_container_info = getattr(swift.proxy.controllers.Controller,
+                                  'container_info', None)
+
     try:
         yield True
     finally:
@@ -276,6 +280,7 @@ def save_globals():
         swift.proxy.controllers.obj.http_connect = orig_http_connect
         swift.proxy.controllers.account.http_connect = orig_http_connect
         swift.proxy.controllers.container.http_connect = orig_http_connect
+        swift.proxy.controllers.Controller.container_info = orig_container_info
 
 
 def set_http_connect(*args, **kwargs):
@@ -2377,34 +2382,85 @@ class TestObjectController(unittest.TestCase):
                     collected_nodes.append(node)
                 self.assertEquals(len(collected_nodes), 9)
 
+                # zero error-limited primary nodes -> no handoff warnings
                 self.app.log_handoffs = True
                 self.app.logger = FakeLogger()
-                object_ring.max_more_nodes = 2
+                self.app.request_node_count = lambda r: 7
+                object_ring.max_more_nodes = 20
                 partition, nodes = object_ring.get_nodes('account',
                                                          'container',
                                                          'object')
                 collected_nodes = []
-                for node in self.app.iter_nodes(object_ring,
-                                                partition):
+                for node in self.app.iter_nodes(object_ring, partition):
                     collected_nodes.append(node)
-                self.assertEquals(len(collected_nodes), 5)
-                self.assertEquals(
-                    self.app.logger.log_dict['warning'],
-                    [(('Handoff requested (1)',), {}),
-                     (('Handoff requested (2)',), {})])
-
-                self.app.log_handoffs = False
-                self.app.logger = FakeLogger()
-                object_ring.max_more_nodes = 2
-                partition, nodes = object_ring.get_nodes('account',
-                                                         'container',
-                                                         'object')
-                collected_nodes = []
-                for node in self.app.iter_nodes(object_ring,
-                                                partition):
-                    collected_nodes.append(node)
-                self.assertEquals(len(collected_nodes), 5)
+                self.assertEquals(len(collected_nodes), 7)
                 self.assertEquals(self.app.logger.log_dict['warning'], [])
+                self.assertEquals(self.app.logger.get_increments(), [])
+
+                # one error-limited primary node -> one handoff warning
+                self.app.log_handoffs = True
+                self.app.logger = FakeLogger()
+                self.app.request_node_count = lambda r: 7
+                object_ring.clear_errors()
+                object_ring._devs[0]['errors'] = 999
+                object_ring._devs[0]['last_error'] = 2 ** 63 - 1
+
+                collected_nodes = []
+                for node in self.app.iter_nodes(object_ring, partition):
+                    collected_nodes.append(node)
+                self.assertEquals(len(collected_nodes), 7)
+                self.assertEquals(self.app.logger.log_dict['warning'], [
+                    (('Handoff requested (5)',), {})])
+                self.assertEquals(self.app.logger.get_increments(),
+                                  ['handoff_count'])
+
+                # two error-limited primary nodes -> two handoff warnings
+                self.app.log_handoffs = True
+                self.app.logger = FakeLogger()
+                self.app.request_node_count = lambda r: 7
+                object_ring.clear_errors()
+                for i in range(2):
+                    object_ring._devs[i]['errors'] = 999
+                    object_ring._devs[i]['last_error'] = 2 ** 63 - 1
+
+                collected_nodes = []
+                for node in self.app.iter_nodes(object_ring, partition):
+                    collected_nodes.append(node)
+                self.assertEquals(len(collected_nodes), 7)
+                self.assertEquals(self.app.logger.log_dict['warning'], [
+                    (('Handoff requested (5)',), {}),
+                    (('Handoff requested (6)',), {})])
+                self.assertEquals(self.app.logger.get_increments(),
+                                  ['handoff_count',
+                                   'handoff_count'])
+
+                # all error-limited primary nodes -> four handoff warnings,
+                # plus a handoff-all metric
+                self.app.log_handoffs = True
+                self.app.logger = FakeLogger()
+                self.app.request_node_count = lambda r: 10
+                object_ring.set_replicas(4)  # otherwise we run out of handoffs
+                object_ring.clear_errors()
+                for i in range(4):
+                    object_ring._devs[i]['errors'] = 999
+                    object_ring._devs[i]['last_error'] = 2 ** 63 - 1
+
+                collected_nodes = []
+                for node in self.app.iter_nodes(object_ring, partition):
+                    collected_nodes.append(node)
+                self.assertEquals(len(collected_nodes), 10)
+                self.assertEquals(self.app.logger.log_dict['warning'], [
+                    (('Handoff requested (7)',), {}),
+                    (('Handoff requested (8)',), {}),
+                    (('Handoff requested (9)',), {}),
+                    (('Handoff requested (10)',), {})])
+                self.assertEquals(self.app.logger.get_increments(),
+                                  ['handoff_count',
+                                   'handoff_count',
+                                   'handoff_count',
+                                   'handoff_count',
+                                   'handoff_all_count'])
+
             finally:
                 object_ring.max_more_nodes = 0
 
@@ -2461,6 +2517,53 @@ class TestObjectController(unittest.TestCase):
             got_nodes = list(self.app.iter_nodes(object_ring, 0,
                                                  node_iter=iter(node_list)))
         self.assertEqual(node_list, got_nodes)
+
+    def test_call_error_limiter_in_init(self):
+        def bad_init(*args):
+            raise OSError()
+
+        with mock.patch('os.makedirs', bad_init):
+            app = proxy_server.Application({'error_limit_config': 'default'},
+                                           FakeMemcache(),
+                                           logger=debug_logger('proxy-ut'),
+                                           account_ring=FakeRing(),
+                                           container_ring=FakeRing())
+            self.assertEqual(app.error_limiter, None)
+            app.report_action_to_node({}, 'request')
+
+        with mock.patch(
+                'swift.common.error_limiter.ErrorLimiter.__init__', bad_init):
+            app = proxy_server.Application({'error_limit_config': 'default'},
+                                           FakeMemcache(),
+                                           logger=debug_logger('proxy-ut'),
+                                           account_ring=FakeRing(),
+                                           container_ring=FakeRing())
+            self.assertEqual(app.error_limiter, None)
+
+
+    def test_iter_nodes_skips_at_most_one_error_limiter(self):
+        object_ring = self.app.get_object_ring(None)
+        with mock.patch.object(
+                self.app, 'error_limiter', ErrorLimiter('default')):
+            with mock.patch.object(
+                    self.app.error_limiter,
+                    'is_error_limited', lambda n: True):
+                with mock.patch.object(self.app, 'sort_nodes', lambda n: n):
+                    object_ring = self.app.get_object_ring(None)
+                    itr = self.app.iter_nodes(object_ring, 0)
+                    self.assertEqual(itr.next()['id'], 1)
+
+                self.app.error_limiter.allow_to_kick = 2
+                with mock.patch.object(self.app, 'sort_nodes', lambda n: n):
+                    object_ring = self.app.get_object_ring(None)
+                    itr = self.app.iter_nodes(object_ring, 0)
+                    self.assertEqual(itr.next()['id'], 2)
+
+                self.app.error_limiter.allow_to_kick = 0
+                with mock.patch.object(self.app, 'sort_nodes', lambda n: n):
+                    object_ring = self.app.get_object_ring(None)
+                    itr = self.app.iter_nodes(object_ring, 0)
+                    self.assertEqual(itr.next()['id'], 0)
 
     def test_best_response_sets_headers(self):
         controller = proxy_server.ObjectController(self.app, 'account',
@@ -5178,7 +5281,14 @@ class TestContainerController(unittest.TestCase):
             self.app.max_containers_per_account = 12345
             controller = proxy_server.ContainerController(self.app, 'account',
                                                           'container')
-            self.assert_status_map(controller.PUT, (201, 201, 201), 403,
+            self.assert_status_map(controller.PUT,
+                                   (200, 200, 201, 201, 201), 201,
+                                   missing_container=True)
+
+            controller = proxy_server.ContainerController(self.app, 'account',
+                                                          'container_new')
+
+            self.assert_status_map(controller.PUT, (200, 404, 404, 404), 403,
                                    missing_container=True)
 
             self.app.max_containers_per_account = 12345

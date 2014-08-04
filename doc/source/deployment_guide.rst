@@ -486,7 +486,7 @@ handoff_delete      auto               By default handoff partitions will be
                                        the partition if it is successfully
                                        replicated to n nodes.  The default
                                        setting should not be changed, except
-                                       for extremem situations.
+                                       for extreme situations.
 node_timeout        DEFAULT or 10      Request timeout to external services.
                                        This uses what's set here, or what's set
                                        in the DEFAULT section, or 10 (though
@@ -846,10 +846,8 @@ log_custom_handlers           None             Comma separated list of functions
                                                handlers.
 eventlet_debug                false            If true, turn on debug logging
                                                for eventlet
-
 expose_info                   true             Enables exposing configuration
                                                settings via HTTP GET /info.
-
 admin_key                                      Key to use for admin calls that
                                                are HMAC signed.  Default
                                                is empty, which will
@@ -954,7 +952,16 @@ swift_owner_headers           <see the sample  These are the headers whose
                               headers>         up to the auth system in use,
                                                but usually indicates
                                                administrative responsibilities.
-============================  ===============  =============================
+error_limit_config                             Use "default" to turn on with
+                                               default settings (requires
+                                               directory:
+                                               /var/run/swift/error_limiter
+                                               to exist and be writable.)
+                                               Otherwise set to path of
+                                               error_limiter config. If not
+                                               set, no error limiting will be
+                                               used.
+============================  ===============  ================================
 
 [tempauth]
 
