@@ -65,7 +65,9 @@ class TestObjectExpirer(TestCase):
             'processes': 5,
             'process': 1,
         }
-        self.assertEqual((5, 1), x.get_process_values(vals))
+        x.get_process_values(vals)
+        self.assertEqual(x.processes, 5)
+        self.assertEqual(x.process, 1)
 
     def test_get_process_values_from_config(self):
         vals = {
@@ -73,7 +75,9 @@ class TestObjectExpirer(TestCase):
             'process': 1,
         }
         x = expirer.ObjectExpirer(vals)
-        self.assertEqual((5, 1), x.get_process_values({}))
+        x.get_process_values({})
+        self.assertEqual(x.processes, 5)
+        self.assertEqual(x.process, 1)
 
     def test_get_process_values_negative_process(self):
         vals = {
@@ -451,7 +455,7 @@ class TestObjectExpirer(TestCase):
 
         fake_swift = InternalClient(
             [{'name': str(int(time() - 86400))}],
-            [{'name': '%d-actual-obj' % int(time() - 86400)}])
+            [{'name': '%d-acc/c/actual-obj' % int(time() - 86400)}])
         x = expirer.ObjectExpirer({}, logger=self.logger, swift=fake_swift)
         x.delete_actual_object = lambda o, t: None
         x.pop_queue = lambda c, o: None
