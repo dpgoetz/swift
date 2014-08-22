@@ -31,7 +31,6 @@ from swift.common.http import HTTP_NOT_FOUND, HTTP_CONFLICT, \
 
 from swift.container.reconciler import direct_delete_container_entry
 
-MAX_OBJECTS_PER_CONTAINER = 10000
 MAX_OBJECTS_TO_CACHE = 100000
 
 
@@ -126,9 +125,8 @@ class ObjectExpirer(Daemon):
 
                 if cache_key not in obj_cache:
                     obj_cache[cache_key] = []
-                if len(obj_cache[cache_key]) < MAX_OBJECTS_PER_CONTAINER:
-                    obj_cache[cache_key].append((container, obj))
-                    cnt += 1
+                obj_cache[cache_key].append((container, obj))
+                cnt += 1
 
                 if cnt > MAX_OBJECTS_TO_CACHE:
                     while obj_cache:
