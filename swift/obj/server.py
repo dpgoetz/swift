@@ -16,12 +16,14 @@
 """ Object Server for Swift """
 
 import cPickle as pickle
+import functools
 import os
 import multiprocessing
 import time
 import traceback
 import socket
 import math
+import uuid
 from swift import gettext_ as _
 from hashlib import md5
 
@@ -30,7 +32,7 @@ from eventlet import sleep, wsgi, Timeout
 from swift.common.utils import public, get_logger, \
     config_true_value, timing_stats, replication, \
     normalize_delete_at_timestamp, get_log_line, Timestamp, \
-    get_expirer_container
+    get_expirer_container, json
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, \
     valid_timestamp, check_utf8
@@ -48,9 +50,36 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
     HTTPPreconditionFailed, HTTPRequestTimeout, HTTPUnprocessableEntity, \
     HTTPClientDisconnect, HTTPMethodNotAllowed, Request, Response, \
     HTTPInsufficientStorage, HTTPForbidden, HTTPException, HeaderKeyDict, \
-    HTTPConflict
+    HTTPConflict, HTTPOk
 from swift.obj.diskfile import DATAFILE_SYSTEM_META, DiskFileManager
 
+
+disk_connections = {'ID': None, 'GET': {}, 'HEAD': {}, 'PUT': {},
+                    'REPLICATE': {}, 'DELETE': {},
+                    'read_times': {'init': {}, 'rest': {}}}
+
+def count_connections(func):
+    """
+    Decorator to count connections hanging on disks
+    """
+
+    @functools.wraps(func)
+    def wrapped(self, request):
+        device = None
+        try:
+            path_parts = get_name_and_placement(request, 2, 5, True)
+            device = path_parts[0]
+        except Exception:
+            pass
+        try:
+            disk_connections[func.__name__][device] = \
+                disk_connections[func.__name__].get(device, 0) + 1
+            return func(self, request)
+        finally:
+            disk_connections[func.__name__][device] = \
+                disk_connections[func.__name__].get(device, 1) - 1
+
+    return wrapped
 
 class EventletPlungerString(str):
     """
@@ -77,6 +106,7 @@ class ObjectController(BaseStorageServer):
         <source-dir>/etc/object-server.conf-sample or
         /etc/swift/object-server.conf-sample.
         """
+        disk_connections['ID'] = uuid.uuid4().hex
         super(ObjectController, self).__init__(conf)
         self.logger = logger or get_logger(conf, log_route='object-server')
         self.node_timeout = int(conf.get('node_timeout', 3))
@@ -387,6 +417,7 @@ class ObjectController(BaseStorageServer):
 
     @public
     @timing_stats()
+    @count_connections
     def PUT(self, request):
         """Handle HTTP PUT requests for the Swift Object Server."""
         device, partition, account, container, obj, policy_idx = \
@@ -507,6 +538,8 @@ class ObjectController(BaseStorageServer):
     @timing_stats()
     def GET(self, request):
         """Handle HTTP GET requests for the Swift Object Server."""
+        if request.path == '/show_conn':
+            return HTTPOk(request=request, body=json.dumps(disk_connections))
         device, partition, account, container, obj, policy_idx = \
             get_name_and_placement(request, 5, 5, True)
         keep_cache = self.keep_cache_private or (
@@ -527,7 +560,8 @@ class ObjectController(BaseStorageServer):
                               ('X-Auth-Token' not in request.headers and
                                'X-Storage-Token' not in request.headers))
                 response = Response(
-                    app_iter=disk_file.reader(keep_cache=keep_cache),
+                    app_iter=disk_file.reader(keep_cache=keep_cache,
+                                              connection_tracker=disk_connections),
                     request=request, conditional_response=True)
                 response.headers['Content-Type'] = metadata.get(
                     'Content-Type', 'application/octet-stream')
@@ -558,6 +592,7 @@ class ObjectController(BaseStorageServer):
 
     @public
     @timing_stats(sample_rate=0.8)
+    @count_connections
     def HEAD(self, request):
         """Handle HTTP HEAD requests for the Swift Object Server."""
         device, partition, account, container, obj, policy_idx = \
@@ -600,6 +635,7 @@ class ObjectController(BaseStorageServer):
 
     @public
     @timing_stats()
+    @count_connections
     def DELETE(self, request):
         """Handle HTTP DELETE requests for the Swift Object Server."""
         device, partition, account, container, obj, policy_idx = \
@@ -674,6 +710,7 @@ class ObjectController(BaseStorageServer):
     @public
     @replication
     @timing_stats(sample_rate=0.1)
+    @count_connections
     def REPLICATE(self, request):
         """
         Handle REPLICATE requests for the Swift Object Server.  This is used

@@ -919,7 +919,8 @@ class DiskFileReader(object):
     """
     def __init__(self, fp, data_file, obj_size, etag, threadpool,
                  disk_chunk_size, keep_cache_size, device_path, logger,
-                 quarantine_hook, use_splice, pipe_size, keep_cache=False):
+                 quarantine_hook, use_splice, pipe_size, keep_cache=False,
+                 connection_tracker=None):
         # Parameter tracking
         self._fp = fp
         self._data_file = data_file
@@ -932,6 +933,7 @@ class DiskFileReader(object):
         self._quarantine_hook = quarantine_hook
         self._use_splice = use_splice
         self._pipe_size = pipe_size
+        self.connection_tracker = connection_tracker
         if keep_cache:
             # Caller suggests we keep this in cache, only do it if the
             # object's size is less than the maximum.
@@ -950,6 +952,9 @@ class DiskFileReader(object):
 
     def __iter__(self):
         """Returns an iterator over the data file."""
+        the_dev = self._device_path.split("/")[-1]
+        if self.connection_tracker:
+            self.connection_tracker['GET'][the_dev] = self.connection_tracker['GET'].get(the_dev, 0) + 1
         try:
             dropped_cache = 0
             self._bytes_read = 0
@@ -959,8 +964,17 @@ class DiskFileReader(object):
                 self._started_at_0 = True
                 self._iter_etag = hashlib.md5()
             while True:
+                start_time = time.time()
                 chunk = self._threadpool.run_in_thread(
                     self._fp.read, self._disk_chunk_size)
+                if self.connection_tracker:
+                    read_time = int((time.time() - start_time)*10)
+                    rkey = 'init'
+                    if self._bytes_read:
+                        rkey = 'rest'
+                    self.connection_tracker['read_times'][rkey][read_time] = \
+                        self.connection_tracker['read_times'][rkey].get(read_time, 0) + 1
+
                 if chunk:
                     if self._iter_etag:
                         self._iter_etag.update(chunk)
@@ -976,6 +990,8 @@ class DiskFileReader(object):
                                      self._bytes_read - dropped_cache)
                     break
         finally:
+            if self.connection_tracker:
+                self.connection_tracker['GET'][the_dev] = self.connection_tracker['GET'].get(the_dev, 1) - 1
             if not self._suppress_file_closing:
                 self.close()
 
@@ -1557,7 +1573,8 @@ class DiskFile(object):
             return self.get_metadata()
 
     def reader(self, keep_cache=False,
-               _quarantine_hook=lambda m: None):
+               _quarantine_hook=lambda m: None,
+               connection_tracker=None):
         """
         Return a :class:`swift.common.swob.Response` class compatible
         "`app_iter`" object as defined by
@@ -1579,7 +1596,8 @@ class DiskFile(object):
             self._metadata['ETag'], self._threadpool, self._disk_chunk_size,
             self._mgr.keep_cache_size, self._device_path, self._logger,
             use_splice=self._use_splice, quarantine_hook=_quarantine_hook,
-            pipe_size=self._pipe_size, keep_cache=keep_cache)
+            pipe_size=self._pipe_size, keep_cache=keep_cache,
+            connection_tracker=connection_tracker)
         # At this point the reader object is now responsible for closing
         # the file pointer.
         self._fp = None
