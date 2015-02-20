@@ -21,7 +21,7 @@ from random import shuffle
 from time import time
 import itertools
 
-from eventlet import Timeout
+from eventlet import Timeout, sleep, spawn_n
 
 from swift import __canonical_version__ as swift_version
 from swift.common import constraints
@@ -30,13 +30,15 @@ from swift.common.ring import Ring
 from swift.common.utils import cache_from_env, get_logger, \
     get_remote_client, split_path, config_true_value, generate_trans_id, \
     affinity_key_function, affinity_locality_predicate, list_from_csv, \
-    register_swift_info
+    register_swift_info, json
 from swift.common.constraints import check_utf8
 from swift.proxy.controllers import AccountController, ObjectController, \
     ContainerController, InfoController
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
     HTTPMethodNotAllowed, HTTPNotFound, HTTPPreconditionFailed, \
     HTTPServerError, HTTPException, Request
+from swift.common.exceptions import ConnectionTimeout
+from swift.common.bufferedhttp import http_connect_raw
 
 
 # List of entry points for mandatory middlewares.
@@ -109,6 +111,8 @@ class Application(object):
         # ensure rings are loaded for all configured storage policies
         for policy in POLICIES:
             policy.load_ring(swift_dir)
+        self.obj_node_diskusage = {}
+        spawn_n(self.start_diskusage_poller)
         self.memcache = memcache
         mimetypes.init(mimetypes.knownfiles +
                        [os.path.join(swift_dir, 'mime.types')])
@@ -380,6 +384,28 @@ class Application(object):
             self.logger.exception(_('ERROR Unhandled exception in request'))
             return HTTPServerError(request=req)
 
+    def start_diskusage_poller(self):
+        while True:
+            for dev in self.get_object_ring(0).devs:
+                sleep_time = .5
+                key = '%s:%s' % (dev['ip'], dev['port'])
+                last_update, conc_req = \
+                    self.obj_node_diskusage.get(key, (0, {}))
+                if time() - last_update > 60 * 10:
+                    sleep_time = 5
+                    try:
+                        with ConnectionTimeout(self.conn_timeout):
+                            conn = http_connect_raw(dev['ip'], dev['port'],
+                                                    'GET', '/diskusage')
+                            resp = conn.getresponse()
+                            usage_data = resp.read()
+                            self.obj_node_diskusage[key] = \
+                                (time(), json.loads(usage_data))
+                            resp.close()
+                    except (Exception, Timeout) as e:
+                        print 'lalala blew it: %s' % e
+                sleep(sleep_time)
+
     def sort_nodes(self, nodes):
         '''
         Sorts nodes in-place (and returns the sorted list) according to
@@ -391,6 +417,12 @@ class Application(object):
         # (ie within the rounding resolution) won't prefer one over another.
         # Python's sort is stable (http://wiki.python.org/moin/HowTo/Sorting/)
         shuffle(nodes)
+        if '%s:%s' % (nodes[0]['ip'], nodes[0]['port']) in self.obj_node_diskusage:
+            def key_func(node):
+                last_update, devices = self.obj_node_diskusage.get(node['ip'], (0, {}))
+                return devices.get(node['device'], 0)
+            nodes.sort(key=key_func)
+
         if self.sorting_method == 'timing':
             now = time()
 
