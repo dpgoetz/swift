@@ -28,6 +28,8 @@ import os
 import time
 import functools
 import inspect
+import itertools
+import copy
 import operator
 from sys import exc_info
 from swift import gettext_ as _
@@ -757,10 +759,23 @@ class GetOrHeadHandler(object):
         node_timeout = self.app.node_timeout
         if self.server_type == 'Object' and not self.newest:
             node_timeout = self.app.recoverable_node_timeout
-        for node in self.app.iter_nodes(self.ring, self.partition):
+        node_iterator = self.app.iter_nodes(self.ring, self.partition)
+        primary_nodes = []
+        for node in node_iterator:
+            primary_nodes.append(node)
+            if len(primary_nodes) >= 3:
+                break
+        force_acquire_nodes = []
+        node_iterator_with_force = itertools.chain(
+            primary_nodes, force_acquire_nodes, node_iterator)
+        for node in node_iterator_with_force:
             if node in self.used_nodes:
                 continue
             start_node_timing = time.time()
+            if 'x-disk-usage' in node:
+                self.backend_headers['X-Force-Acquire'] = 'true'
+            else:
+                self.backend_headers.pop('X-Force-Acquire', None)
             try:
                 with ConnectionTimeout(self.app.conn_timeout):
                     conn = http_connect(
@@ -809,6 +824,19 @@ class GetOrHeadHandler(object):
                     if not self.newest:  # one good source is enough
                         break
             else:
+                if possible_source.status == HTTP_SERVICE_UNAVAILABLE and \
+                        len(force_acquire_nodes) < 3:
+                    src_headers = dict(
+                        (k.lower(), v) for k, v in
+                        possible_source.getheaders())
+                    if 'x-disk-usage' in src_headers:
+                        node_copy = copy.deepcopy(node)
+                        node_copy['x-disk-usage'] = src_headers['x-disk-usage']
+                        force_acquire_nodes.append(node_copy)
+                        force_acquire_nodes.sort(
+                            key=lambda n: n['x-disk-usage'])
+                        continue
+
                 self.statuses.append(possible_source.status)
                 self.reasons.append(possible_source.reason)
                 self.bodies.append(possible_source.read())
@@ -941,6 +969,7 @@ class Controller(object):
         headers['connection'] = 'close'
         headers['user-agent'] = 'proxy-server %s' % os.getpid()
         headers['referer'] = referer
+        headers.pop('x-force-acquire', None)
         return headers
 
     def account_info(self, account, req=None):
