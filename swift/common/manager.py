@@ -20,6 +20,7 @@ import resource
 import signal
 import time
 import subprocess
+import ConfigParser
 import re
 from swift import gettext_ as _
 
@@ -441,6 +442,15 @@ class Server(object):
                     print _('Found configs:')
                 for i, conf_file in enumerate(found_conf_files):
                     print '  %d) %s' % (i + 1, conf_file)
+
+        for conf_file in list(conf_files):
+            config = ConfigParser.ConfigParser()
+            config.read(conf_file)
+            if not(self.server in config.sections() or
+                   "app:%s" % self.server in config.sections()):
+                print "Skipping %s because was not found in %s." % (
+                    self.server, conf_file)
+                conf_files.remove(conf_file)
 
         return conf_files
 
