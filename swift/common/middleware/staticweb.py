@@ -148,7 +148,7 @@ class _StaticWebContext(WSGIContext):
         self.agent = '%(orig)s StaticWeb'
         # Results from the last call to self._get_container_info.
         self._index = self._error = self._listings = self._listings_css = \
-            self._dir_type = None
+            self._dir_type = self._cache_control = None
 
     def _error_response(self, response, env, start_response):
         """
@@ -199,6 +199,7 @@ class _StaticWebContext(WSGIContext):
             self._listings = meta.get('web-listings', '').strip()
             self._listings_css = meta.get('web-listings-css', '').strip()
             self._dir_type = meta.get('web-directory-type', '').strip()
+            self._cache_control = meta.get('cache-control', '').strip()
 
     def _listing(self, env, start_response, prefix=None):
         """
@@ -335,6 +336,15 @@ class _StaticWebContext(WSGIContext):
             css_path = '../' * prefix.count('/') + quote(self._listings_css)
         return css_path
 
+    def _set_cache_control(self):
+        """
+        Set the outgoing Cache-Control header
+        """
+        if self._cache_control and \
+                'cache-control' not in self._response_headers:
+            self._response_headers.append(
+                ('cache-control', self._cache_control))
+
     def handle_container(self, env, start_response):
         """
         Handles a possible static web request for a container.
@@ -359,6 +369,7 @@ class _StaticWebContext(WSGIContext):
         tmp_env['swift.source'] = 'SW'
         tmp_env['PATH_INFO'] += self._index
         resp = self._app_call(tmp_env)
+        self._set_cache_control()
         status_int = self._get_status_int()
         if status_int == HTTP_NOT_FOUND:
             return self._listing(env, start_response)
@@ -384,6 +395,7 @@ class _StaticWebContext(WSGIContext):
         resp = self._app_call(tmp_env)
         status_int = self._get_status_int()
         self._get_container_info(env)
+        self._set_cache_control()
         if is_success(status_int) or is_redirection(status_int):
             # Treat directory marker objects as not found
             if not self._dir_type:
