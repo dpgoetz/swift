@@ -379,7 +379,7 @@ class BaseObjectController(Controller):
                 with ConnectionTimeout(self.app.conn_timeout):
                     conn = http_connect(
                         node['ip'], node['port'], node['device'], part, 'PUT',
-                        path, headers)
+                        path, headers, socket_timeout=self.app.socket_conn_timeout)
                 self.app.set_node_timing(node, time.time() - start_time)
                 with Timeout(self.app.node_timeout):
                     resp = conn.getexpect()

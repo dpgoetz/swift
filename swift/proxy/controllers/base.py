@@ -978,7 +978,8 @@ class ResumingGetter(object):
                         node['ip'], node['port'], node['device'],
                         self.partition, self.req_method, self.path,
                         headers=self.backend_headers,
-                        query_string=self.req_query_string)
+                        query_string=self.req_query_string,
+                        socket_timeout=self.app.socket_conn_timeout)
                 self.app.set_node_timing(node, time.time() - start_node_timing)
 
                 with Timeout(node_timeout):
@@ -1277,7 +1278,8 @@ class Controller(object):
                 with ConnectionTimeout(self.app.conn_timeout):
                     conn = http_connect(node['ip'], node['port'],
                                         node['device'], part, method, path,
-                                        headers=headers, query_string=query)
+                                        headers=headers, query_string=query,
+                                        socket_timeout=self.app.socket_timeout)
                     conn.node = node
                 self.app.set_node_timing(node, time.time() - start_node_timing)
                 with Timeout(self.app.node_timeout):
