@@ -387,24 +387,26 @@ class Application(object):
     def start_diskusage_poller(self):
         while True:
             for dev in self.get_object_ring(0).devs:
-                sleep_time = .5
                 key = '%s:%s' % (dev['ip'], dev['port'])
-                last_update, conc_req = \
-                    self.obj_node_diskusage.get(key, (0, {}))
-                if time() - last_update > 60 * 10:
-                    sleep_time = 5
+                last_update, conn_times = \
+                    self.onode_conn_times.get(key, (0, []))
+                begin = time()
+                if begin - last_update > 60:
                     try:
                         with ConnectionTimeout(self.conn_timeout):
                             conn = http_connect_raw(dev['ip'], dev['port'],
-                                                    'GET', '/diskusage')
+                                                    'GET', '/healthcheck')
                             resp = conn.getresponse()
-                            usage_data = resp.read()
-                            self.obj_node_diskusage[key] = \
-                                (time(), json.loads(usage_data))
+                            resp.read()
                             resp.close()
                     except (Exception, Timeout) as e:
-                        print 'lalala blew it: %s' % e
-                sleep(sleep_time)
+                        pass
+                    now = time()
+                    if len(conn_times) >= 10:
+                        conn_times.pop(0)
+                    conn_times.append(now - begin)
+                    self.onode_conn_times[key] = (now, conn_times)
+                sleep(.1)
 
     def sort_nodes(self, nodes):
         '''
@@ -417,10 +419,11 @@ class Application(object):
         # (ie within the rounding resolution) won't prefer one over another.
         # Python's sort is stable (http://wiki.python.org/moin/HowTo/Sorting/)
         shuffle(nodes)
-        if '%s:%s' % (nodes[0]['ip'], nodes[0]['port']) in self.obj_node_diskusage:
+        if '%s:%s' % (nodes[0]['ip'], nodes[0]['port']) in self.onode_conn_times:
             def key_func(node):
-                last_update, devices = self.obj_node_diskusage.get(node['ip'], (0, {}))
-                return devices.get(node['device'], 0)
+                key = '%s:%s' % (node['ip'], node['port'])
+                last_update, conn_times = self.onode_conn_times.get(key, (0, []))
+                return sum(conn_times)
             nodes.sort(key=key_func)
 
         if self.sorting_method == 'timing':
