@@ -12,14 +12,15 @@ import uuid
 from hashlib import md5
 
 from swift.common.utils import hash_path
+from test.direct import OBJ_CONF_FILES
 
 
 class TestReplicationSwift(unittest.TestCase):
-    config_file = '/etc/swift/object-server/1.conf'
 
     def setUp(self):
+        config_file = OBJ_CONF_FILES[0]
         config = ConfigParser.ConfigParser()
-        config.read(self.config_file)
+        config.read(config_file)
         self.config = dict(config.items('DEFAULT'))
 
         self.drive_root = self.config.get('devices', '/srv/node')
@@ -33,7 +34,6 @@ class TestReplicationSwift(unittest.TestCase):
         ip = self.config.get('bind_ip', '127.0.0.1')
         port = self.config.get('bind_port', '6010')
         self.conn = httplib.HTTPConnection('%s:%s' % (ip, port))
-
 
     def tearDown(self):
         try:
@@ -137,9 +137,9 @@ class TestReplicationSwift(unittest.TestCase):
         self.assertEqual(201, resp.status)
         resp.read()
 
-        print 'lala: %s' % os.listdir(self.part_path)
+        print 'part_path listdir: %s' % os.listdir(self.part_path)
         hashes_pkl = cPickle.load(open(os.path.join(self.part_path, 'hashes.pkl')))
-        print "moooo: %s" % hashes_pkl
+        print "hashespkl: %s" % hashes_pkl
 
 if __name__ == '__main__':
         unittest.main()
