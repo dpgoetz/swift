@@ -137,9 +137,19 @@ class TestReplicationSwift(unittest.TestCase):
         self.assertEqual(201, resp.status)
         resp.read()
 
-        print 'part_path listdir: %s' % os.listdir(self.part_path)
         hashes_pkl = cPickle.load(open(os.path.join(self.part_path, 'hashes.pkl')))
-        print "hashespkl: %s" % hashes_pkl
+        self.assertEqual(hashes_pkl[obj_hash[-3:]], None)
+        self.conn.request('REPLICATE',
+                     '/'.join(['', self.device,
+                               str(self.part), obj_hash[-3:]]),
+                     body='',)
+
+        resp = self.conn.getresponse()
+        body = resp.read()
+        repl_data = cPickle.loads(body)
+        ondisk_filename = '%.5f.data' % (x_timestamp + 1)
+        self.assertEqual(
+            repl_data, {obj_hash[-3:]: md5(ondisk_filename).hexdigest()})
 
 if __name__ == '__main__':
         unittest.main()
