@@ -27,7 +27,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +39,7 @@ var ReplicationSessionTimeout = 60 * time.Second
 var RunForeverInterval = 30 * time.Second
 var StatsReportInterval = 300 * time.Second
 var TmpEmptyTime = 24 * time.Hour
+var ReplicateDeviceTimeout = 4 * time.Hour
 
 // Encapsulates a partition for replication.
 type job struct {
@@ -67,6 +67,23 @@ type PriorityRepJob struct {
 	ToDevices  []*hummingbird.Device `json:"to_devices"`
 }
 
+type DeviceProgress struct {
+	PartitionsDone   uint64
+	PartitionsTotal  uint64
+	StartDate        time.Time
+	LastUpdate       time.Time
+	FilesSent        uint64
+	BytesSent        uint64
+	PriorityRepsDone uint64
+
+	FullReplicateCount uint64
+	CancelCount        uint64
+	LastPassDuration   time.Duration
+	LastPassUpdate     time.Time
+
+	dev *hummingbird.Device
+}
+
 // Object replicator daemon object
 type Replicator struct {
 	concurrency    int
@@ -90,11 +107,9 @@ type Replicator struct {
 	reclaimAge     int64
 
 	/* stats accounting */
-	startTime                                                     time.Time
-	replicationCount, jobCount, dataTransferred, filesTransferred uint64
-	replicationCountIncrement, jobCountIncrement, dataTransferAdd chan uint64
-	partitionTimes                                                sort.Float64Slice
-	partitionTimesAdd                                             chan float64
+	deviceProgress         map[string]*DeviceProgress
+	deviceProgressIncr     chan DeviceProgress
+	deviceProgressPassInit chan DeviceProgress
 }
 
 func (r *Replicator) LogError(format string, args ...interface{}) {
@@ -248,7 +263,7 @@ type syncFileArg struct {
 	dev  *hummingbird.Device
 }
 
-func (r *Replicator) syncFile(objFile string, dst []*syncFileArg) (syncs int, insync int, err error) {
+func (r *Replicator) syncFile(objFile string, dst []*syncFileArg, j *job) (syncs int, insync int, err error) {
 	var wrs []*syncFileArg
 	lst := strings.Split(objFile, string(os.PathSeparator))
 	relPath := filepath.Join(lst[len(lst)-5:]...)
@@ -312,9 +327,13 @@ func (r *Replicator) syncFile(objFile string, dst []*syncFileArg) (syncs int, in
 		sfa.conn.Flush()
 		if sfa.conn.RecvMessage(&fur) == nil {
 			if fur.Success {
-				r.dataTransferAdd <- uint64(fileSize)
 				syncs++
 				insync++
+				r.deviceProgressIncr <- DeviceProgress{
+					dev:       j.dev,
+					FilesSent: 1,
+					BytesSent: uint64(fileSize),
+				}
 			}
 		}
 	}
@@ -396,7 +415,7 @@ func (r *Replicator) replicateLocal(j *job, nodes []*hummingbird.Device, moreNod
 				toSync = append(toSync, &syncFileArg{conn: remoteConnections[dev.Id], dev: dev})
 			}
 		}
-		if syncs, _, err := r.syncFile(objFile, toSync); err == nil {
+		if syncs, _, err := r.syncFile(objFile, toSync, j); err == nil {
 			syncCount += syncs
 		} else {
 			r.LogError("[syncFile] %v", err)
@@ -448,7 +467,7 @@ func (r *Replicator) replicateHandoff(j *job, nodes []*hummingbird.Device) {
 				toSync = append(toSync, &syncFileArg{conn: remoteConnections[dev.Id], dev: dev})
 			}
 		}
-		if syncs, insync, err := r.syncFile(objFile, toSync); err == nil {
+		if syncs, insync, err := r.syncFile(objFile, toSync, j); err == nil {
 			syncCount += syncs
 
 			success := insync == len(nodes)
@@ -485,141 +504,72 @@ func (r *Replicator) cleanTemp(dev *hummingbird.Device) {
 	}
 }
 
-func (r *Replicator) replicateDevice(dev *hummingbird.Device) {
-	defer r.LogPanics("PANIC REPLICATING DEVICE")
+func (r *Replicator) replicateDevice(dev *hummingbird.Device, once bool) {
+	defer r.LogPanics(fmt.Sprintf("PANIC REPLICATING DEVICE: %s", dev.Device))
 	defer r.devGroup.Done()
 
-	r.cleanTemp(dev)
+	if _, ok := r.deviceProgress[dev.Device]; !ok {
+		dp := &DeviceProgress{
+			dev:        dev,
+			StartDate:  time.Now(),
+			LastUpdate: time.Now(),
+		}
+		r.deviceProgress[dev.Device] = dp
+	}
+	canceler := make(chan struct{})
+	go r.monitorReplication(r.deviceProgress[dev.Device], canceler)
 
-	if mounted, err := hummingbird.IsMount(filepath.Join(r.driveRoot, dev.Device)); r.checkMounts && (err != nil || mounted != true) {
-		r.LogError("[replicateDevice] Drive not mounted: %s", dev.Device)
-		return
-	}
-	objPath := filepath.Join(r.driveRoot, dev.Device, "objects")
-	if fi, err := os.Stat(objPath); err != nil || !fi.Mode().IsDir() {
-		r.LogError("[replicateDevice] No objects found: %s", objPath)
-		return
-	}
-	partitionList, err := filepath.Glob(filepath.Join(objPath, "[0-9]*"))
-	if err != nil {
-		r.LogError("[replicateDevice] Error getting partition list: %s (%v)", objPath, err)
-		return
-	}
-	for i := len(partitionList) - 1; i > 0; i-- { // shuffle partition list
-		j := rand.Intn(i + 1)
-		partitionList[j], partitionList[i] = partitionList[i], partitionList[j]
-	}
-	r.jobCountIncrement <- uint64(len(partitionList))
-	for _, partition := range partitionList {
-		if hummingbird.Exists(filepath.Join(r.driveRoot, dev.Device, "lock_device")) {
+	var lastPassDuration time.Duration
+	for {
+		r.cleanTemp(dev)
+		passStartTime := time.Now()
+
+		if mounted, err := hummingbird.IsMount(filepath.Join(r.driveRoot, dev.Device)); r.checkMounts && (err != nil || mounted != true) {
+			r.LogError("[replicateDevice] Drive not mounted: %s", dev.Device)
 			break
 		}
-		r.processPriorityJobs(dev.Id)
-		if len(r.partitions) > 0 {
-			found := false
-			for _, p := range r.partitions {
-				if filepath.Base(partition) == p {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
+		objPath := filepath.Join(r.driveRoot, dev.Device, "objects")
+		if fi, err := os.Stat(objPath); err != nil || !fi.Mode().IsDir() {
+			r.LogError("[replicateDevice] No objects found: %s", objPath)
+			break
 		}
-		if partitioni, err := strconv.ParseUint(filepath.Base(partition), 10, 64); err == nil {
-			func() {
-				<-r.partRateTicker.C
-				r.concurrencySem <- struct{}{}
-				r.replicationCountIncrement <- 1
-				j := &job{objPath: objPath, partition: filepath.Base(partition), dev: dev}
-				nodes, handoff := r.Ring.GetJobNodes(partitioni, j.dev.Id)
-				partStart := time.Now()
-				defer func() {
-					<-r.concurrencySem
-					r.partitionTimesAdd <- float64(time.Since(partStart)) / float64(time.Second)
-				}()
-				if handoff {
-					r.replicateHandoff(j, nodes)
-				} else {
-					r.replicateLocal(j, nodes, r.Ring.GetMoreNodes(partitioni))
-				}
-			}()
-		}
-	}
-}
-
-// Collect and log replication stats - runs in a goroutine launched by run(), runs for the duration of a replication pass.
-func (r *Replicator) statsReporter(c <-chan time.Time) {
-	for {
-		select {
-		case dt := <-r.dataTransferAdd:
-			r.dataTransferred += dt
-			r.filesTransferred += 1
-		case jobs := <-r.jobCountIncrement:
-			r.jobCount += jobs
-		case replicates := <-r.replicationCountIncrement:
-			r.replicationCount += replicates
-		case partitionTime := <-r.partitionTimesAdd:
-			r.partitionTimes = append(r.partitionTimes, partitionTime)
-		case now, ok := <-c:
-			if !ok {
-				return
-			}
-			if r.replicationCount > 0 {
-				elapsed := float64(now.Sub(r.startTime)) / float64(time.Second)
-				remaining := time.Duration(float64(now.Sub(r.startTime))/(float64(r.replicationCount)/float64(r.jobCount))) - now.Sub(r.startTime)
-				var remainingStr string
-				if remaining >= time.Hour {
-					remainingStr = fmt.Sprintf("%.0fh", remaining.Hours())
-				} else if remaining >= time.Minute {
-					remainingStr = fmt.Sprintf("%.0fm", remaining.Minutes())
-				} else {
-					remainingStr = fmt.Sprintf("%.0fs", remaining.Seconds())
-				}
-				r.LogInfo("%d/%d (%.2f%%) partitions replicated in %.2fs (%.2f/sec, %v remaining)",
-					r.replicationCount, r.jobCount, float64(100*r.replicationCount)/float64(r.jobCount),
-					elapsed, float64(r.replicationCount)/elapsed, remainingStr)
-			}
-			if len(r.partitionTimes) > 0 {
-				r.partitionTimes.Sort()
-				r.LogInfo("Partition times: max %.4fs, min %.4fs, med %.4fs",
-					r.partitionTimes[len(r.partitionTimes)-1], r.partitionTimes[0],
-					r.partitionTimes[len(r.partitionTimes)/2])
-			}
-			if r.dataTransferred > 0 {
-				elapsed := float64(now.Sub(r.startTime)) / float64(time.Second)
-				r.LogInfo("Data synced: %d (%.2f kbps), files synced: %d",
-					r.dataTransferred, ((float64(r.dataTransferred)/1024.0)*8.0)/elapsed, r.filesTransferred)
-			}
-		}
-	}
-}
-
-// Run replication passes of the whole server until c is closed.
-func (r *Replicator) run(c <-chan time.Time) {
-	for _ = range c {
-		r.partitionTimes = nil
-		r.jobCount = 0
-		r.replicationCount = 0
-		r.dataTransferred = 0
-		r.filesTransferred = 0
-		r.startTime = time.Now()
-		statsTicker := time.NewTicker(StatsReportInterval)
-		go r.statsReporter(statsTicker.C)
-
-		r.partRateTicker = time.NewTicker(r.timePerPart)
-		r.concurrencySem = make(chan struct{}, r.concurrency)
-		localDevices, err := r.Ring.LocalDevices(r.port)
+		partitionList, err := filepath.Glob(filepath.Join(objPath, "[0-9]*"))
 		if err != nil {
-			r.LogError("Error getting local devices: %v", err)
-			continue
+			r.LogError("[replicateDevice] Error getting partition list: %s (%v)", objPath, err)
+			break
 		}
-		for _, dev := range localDevices {
-			if len(r.devices) > 0 {
+		// if one of the breaks above triggers, the monitorer should retry after ReplicateDeviceTimeout
+		for i := len(partitionList) - 1; i > 0; i-- { // shuffle partition list
+			j := rand.Intn(i + 1)
+			partitionList[j], partitionList[i] = partitionList[i], partitionList[j]
+		}
+
+		numPartitions := uint64(len(partitionList))
+		partitionsProcessed := uint64(0)
+
+		r.deviceProgressPassInit <- DeviceProgress{
+			dev:              dev,
+			PartitionsTotal:  numPartitions,
+			LastPassDuration: lastPassDuration,
+		}
+
+		for _, partition := range partitionList {
+			if hummingbird.Exists(filepath.Join(r.driveRoot, dev.Device, "lock_device")) {
+				break
+			}
+			select {
+			case <-canceler:
+				{
+					r.LogError("replicateDevice canceled for device: %s", dev.Device)
+					return
+				}
+			default:
+			}
+			r.processPriorityJobs(dev.Id)
+			if len(r.partitions) > 0 {
 				found := false
-				for _, d := range r.devices {
-					if dev.Device == d {
+				for _, p := range r.partitions {
+					if filepath.Base(partition) == p {
 						found = true
 						break
 					}
@@ -628,19 +578,184 @@ func (r *Replicator) run(c <-chan time.Time) {
 					continue
 				}
 			}
-			r.devGroup.Add(1)
-			go r.replicateDevice(dev)
+			if partitioni, err := strconv.ParseUint(filepath.Base(partition), 10, 64); err == nil {
+				func() {
+					<-r.partRateTicker.C
+					r.concurrencySem <- struct{}{}
+					r.deviceProgressIncr <- DeviceProgress{
+						dev:            dev,
+						PartitionsDone: 1,
+					}
+					j := &job{objPath: objPath, partition: filepath.Base(partition), dev: dev}
+					nodes, handoff := r.Ring.GetJobNodes(partitioni, j.dev.Id)
+					defer func() {
+						<-r.concurrencySem
+					}()
+					partitionsProcessed += 1
+					if handoff {
+						r.replicateHandoff(j, nodes)
+					} else {
+						r.replicateLocal(j, nodes, r.Ring.GetMoreNodes(partitioni))
+					}
+				}()
+			}
 		}
-		r.devGroup.Wait()
-		r.partRateTicker.Stop()
-		statsTicker.Stop()
-		r.statsReporter(OneTimeChan())
-		hummingbird.DumpReconCache(r.reconCachePath, "object",
-			map[string]interface{}{
-				"object_replication_time": float64(time.Since(r.startTime)) / float64(time.Second),
-				"object_replication_last": float64(time.Now().UnixNano()) / float64(time.Second),
-			})
+		if partitionsProcessed >= numPartitions {
+			r.deviceProgressIncr <- DeviceProgress{
+				dev:                dev,
+				FullReplicateCount: 1,
+			}
+			lastPassDuration = time.Since(passStartTime)
+		}
+		if once {
+			break
+		} else {
+			time.Sleep(RunForeverInterval)
+		}
 	}
+}
+
+// Collect and log replication stats - runs in a goroutine launched by run(), runs for the duration of a replication pass.
+func (r *Replicator) statsReporter(c <-chan time.Time) {
+	for {
+		select {
+		case deviceProgress := <-r.deviceProgressPassInit:
+			if curDp, ok := r.deviceProgress[deviceProgress.dev.Device]; !ok {
+				r.LogError("Trying to initialize progress and not present: %s", deviceProgress.dev.Device)
+
+			} else {
+				curDp.StartDate = time.Now()
+				curDp.LastUpdate = time.Now()
+				curDp.PartitionsDone = 0
+				curDp.PartitionsTotal = deviceProgress.PartitionsTotal
+				curDp.FilesSent = 0
+				curDp.BytesSent = 0
+				curDp.PriorityRepsDone = 0
+				curDp.LastPassDuration = deviceProgress.LastPassDuration
+				if deviceProgress.LastPassDuration > 0 {
+					curDp.LastPassUpdate = time.Now()
+				}
+			}
+		case deviceProgress := <-r.deviceProgressIncr:
+			if curDp, ok := r.deviceProgress[deviceProgress.dev.Device]; !ok {
+				r.LogError("Trying to increment progress and not present: %s", deviceProgress.dev.Device)
+			} else {
+				curDp.LastUpdate = time.Now()
+				curDp.PartitionsDone += deviceProgress.PartitionsDone
+				curDp.FilesSent += deviceProgress.FilesSent
+				curDp.BytesSent += deviceProgress.BytesSent
+				curDp.PriorityRepsDone += deviceProgress.PriorityRepsDone
+				curDp.FullReplicateCount += deviceProgress.FullReplicateCount
+				curDp.CancelCount += deviceProgress.CancelCount
+			}
+		case _, ok := <-c:
+			if !ok {
+				return
+			}
+			var totalParts uint64
+			var doneParts uint64
+			var bytesProcessed uint64
+			var filesProcessed uint64
+			var processingDuration time.Duration
+			allHaveCompleted := true
+			var totalDuration time.Duration
+			var maxLastPassUpdate time.Time
+
+			for _, dp := range r.deviceProgress {
+				totalParts += dp.PartitionsTotal
+				doneParts += dp.PartitionsDone
+				bytesProcessed += dp.BytesSent
+				filesProcessed += dp.FilesSent
+				processingDuration += dp.LastUpdate.Sub(dp.StartDate)
+
+				allHaveCompleted = allHaveCompleted && (dp.LastPassDuration > 0)
+				totalDuration += processingDuration
+				if maxLastPassUpdate.Before(dp.LastPassUpdate) {
+					maxLastPassUpdate = dp.LastPassUpdate
+				}
+			}
+
+			if doneParts > 0 {
+				processingNsecs := float64(processingDuration.Nanoseconds())
+				partsPerNsecond := float64(doneParts) / processingNsecs
+				remaining := time.Duration(float64(totalParts-doneParts) / partsPerNsecond)
+				var remainingStr string
+				if remaining >= time.Hour {
+					remainingStr = fmt.Sprintf("%.0fh", remaining.Hours())
+				} else if remaining >= time.Minute {
+					remainingStr = fmt.Sprintf("%.0fm", remaining.Minutes())
+				} else {
+					remainingStr = fmt.Sprintf("%.0fs", remaining.Seconds())
+				}
+				r.LogInfo("%d/%d (%.2f%%) partitions replicated in %.2f worker seconds (%.2f/sec, %v remaining)",
+					doneParts, totalParts, float64(100*doneParts)/float64(totalParts),
+					processingNsecs/float64(time.Second), partsPerNsecond*float64(time.Second), remainingStr)
+			}
+
+			if allHaveCompleted {
+				// this is a little lame- i'd rather just drop this completely
+				hummingbird.DumpReconCache(r.reconCachePath, "object",
+					map[string]interface{}{
+						"object_replication_time": float64(totalDuration) / float64(len(r.deviceProgress)) / float64(time.Second),
+						"object_replication_last": float64(maxLastPassUpdate.UnixNano()) / float64(time.Second),
+					})
+
+			}
+		}
+	}
+}
+
+func (r *Replicator) restartDevice(dp *DeviceProgress, canceler chan struct{}) {
+	r.deviceProgressIncr <- DeviceProgress{
+		dev:         dp.dev,
+		CancelCount: 1,
+	}
+	close(canceler)
+	r.devGroup.Add(1)
+	go r.replicateDevice(dp.dev, false)
+}
+
+// will monitor r.deviceProgress and restart replicateDevice goroutines if
+// they look like they are not running anymore
+func (r *Replicator) monitorReplication(dp *DeviceProgress, canceler chan struct{}) {
+	for {
+		time.Sleep(300 * time.Second)
+		if time.Since(dp.LastUpdate) > ReplicateDeviceTimeout {
+			r.restartDevice(dp, canceler)
+			break
+		}
+	}
+}
+
+// Run replication passes for each device on the whole server.
+func (r *Replicator) run(once bool) {
+	statsTicker := time.NewTicker(StatsReportInterval)
+	go r.statsReporter(statsTicker.C)
+
+	r.partRateTicker = time.NewTicker(r.timePerPart)
+	r.concurrencySem = make(chan struct{}, r.concurrency)
+	localDevices, err := r.Ring.LocalDevices(r.port)
+	if err != nil {
+		r.LogError("Error getting local devices: %v", err)
+		return
+	}
+	for _, dev := range localDevices {
+		if len(r.devices) > 0 {
+			found := false
+			for _, d := range r.devices {
+				if dev.Device == d {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		r.devGroup.Add(1)
+		go r.replicateDevice(dev, once)
+	}
+	r.devGroup.Wait()
 }
 
 // processPriorityJobs runs any pending priority jobs given the device's id
@@ -648,21 +763,22 @@ func (r *Replicator) processPriorityJobs(id int) {
 	for {
 		select {
 		case pri := <-r.getPriRepChan(id):
-			r.jobCountIncrement <- 1
+			r.deviceProgressIncr <- DeviceProgress{
+				dev:              pri.FromDevice,
+				PriorityRepsDone: 1,
+			}
+
 			func() {
 				<-r.partRateTicker.C
 				r.concurrencySem <- struct{}{}
-				r.replicationCountIncrement <- 1
 				j := &job{
 					dev:       pri.FromDevice,
 					partition: strconv.FormatUint(pri.Partition, 10),
 					objPath:   filepath.Join(r.driveRoot, pri.FromDevice.Device, "objects"),
 				}
 				_, handoff := r.Ring.GetJobNodes(pri.Partition, pri.FromDevice.Id)
-				partStart := time.Now()
 				defer func() {
 					<-r.concurrencySem
-					r.partitionTimesAdd <- float64(time.Since(partStart)) / float64(time.Second)
 				}()
 				toDevicesArr := make([]string, len(pri.ToDevices))
 				for i, s := range pri.ToDevices {
@@ -693,6 +809,27 @@ func (r *Replicator) getPriRepChan(id int) chan PriorityRepJob {
 		r.priRepChans[id] = make(chan PriorityRepJob)
 	}
 	return r.priRepChans[id]
+}
+
+// ProgressReportHandler handles HTTP requests for current replication progress
+func (r *Replicator) ProgressReportHandler(w http.ResponseWriter, req *http.Request) {
+	_, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	data, err := json.Marshal(r.deviceProgress)
+	if err != nil {
+		r.LogError("Error Marshaling device progress: ", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+	return
+
 }
 
 // priorityRepHandler handles HTTP requests for priority replications jobs.
@@ -729,6 +866,7 @@ func (r *Replicator) priorityRepHandler(w http.ResponseWriter, req *http.Request
 func (r *Replicator) startWebServer() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/priorityrep", r.priorityRepHandler)
+	mux.HandleFunc("/progress", r.ProgressReportHandler)
 	mux.Handle("/debug/", http.DefaultServeMux)
 	for {
 		if sock, err := hummingbird.RetryListen(r.bindIp, r.bindPort); err != nil {
@@ -739,24 +877,23 @@ func (r *Replicator) startWebServer() {
 	}
 }
 
-// Run a single replication pass.
+// Run a single replication pass. (NOTE: we will prob get rid of this because of priorityRepl)
 func (r *Replicator) Run() {
-	r.run(OneTimeChan())
+	r.run(true)
 }
 
 // Run replication passes in a loop until forever.
 func (r *Replicator) RunForever() {
 	go r.startWebServer()
-	r.run(time.Tick(RunForeverInterval))
+	r.run(false)
 }
 
 func NewReplicator(conf string, flags *flag.FlagSet) (hummingbird.Daemon, error) {
 	replicator := &Replicator{
-		partitionTimesAdd:         make(chan float64),
-		replicationCountIncrement: make(chan uint64),
-		jobCountIncrement:         make(chan uint64),
-		dataTransferAdd:           make(chan uint64),
-		priRepChans:               make(map[int]chan PriorityRepJob),
+		priRepChans:            make(map[int]chan PriorityRepJob),
+		deviceProgress:         make(map[string]*DeviceProgress),
+		deviceProgressPassInit: make(chan DeviceProgress),
+		deviceProgressIncr:     make(chan DeviceProgress),
 	}
 	hashPathPrefix, hashPathSuffix, err := hummingbird.GetHashPrefixAndSuffix()
 	if err != nil {
