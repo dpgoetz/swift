@@ -36,7 +36,6 @@ import (
 )
 
 var ReplicationSessionTimeout = 60 * time.Second
-var RunForeverInterval = 30 * time.Second
 var StatsReportInterval = 300 * time.Second
 var TmpEmptyTime = 24 * time.Hour
 var ReplicateDeviceTimeout = 4 * time.Hour
@@ -67,7 +66,7 @@ type PriorityRepJob struct {
 	ToDevices  []*hummingbird.Device `json:"to_devices"`
 }
 
-type DeviceProgress struct {
+type DeviceProgress struct { // DFG make the lowercase
 	PartitionsDone   uint64
 	PartitionsTotal  uint64
 	StartDate        time.Time
@@ -100,11 +99,14 @@ type Replicator struct {
 	timePerPart    time.Duration
 	quorumDelete   bool
 	concurrencySem chan struct{}
-	devices        []string
-	partitions     []string
+	devices        map[string]bool
+	partitions     map[string]bool
 	priRepChans    map[int]chan PriorityRepJob
 	priRepM        sync.Mutex
 	reclaimAge     int64
+
+	once      bool
+	cancelers map[string]chan struct{}
 
 	/* stats accounting */
 	deviceProgress         map[string]*DeviceProgress
@@ -504,21 +506,20 @@ func (r *Replicator) cleanTemp(dev *hummingbird.Device) {
 	}
 }
 
-func (r *Replicator) replicateDevice(dev *hummingbird.Device, once bool) {
+// start or restart replication on a device and set up canceler
+func (r *Replicator) restartReplicateDevice(dev *hummingbird.Device) {
+	r.devGroup.Add(1)
+	if canceler, ok := r.cancelers[dev.Device]; ok {
+		close(canceler)
+	}
+	r.cancelers[dev.Device] = make(chan struct{})
+	go r.replicateDevice(dev, r.cancelers[dev.Device])
+}
+
+// Run replication on given device. For normal usage do not call directly, use "restartReplicateDevice"
+func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan struct{}) {
 	defer r.LogPanics(fmt.Sprintf("PANIC REPLICATING DEVICE: %s", dev.Device))
 	defer r.devGroup.Done()
-
-	if _, ok := r.deviceProgress[dev.Device]; !ok {
-		dp := &DeviceProgress{
-			dev:        dev,
-			StartDate:  time.Now(),
-			LastUpdate: time.Now(),
-		}
-		r.deviceProgress[dev.Device] = dp
-	}
-	canceler := make(chan struct{})
-	go r.monitorReplication(r.deviceProgress[dev.Device], canceler)
-
 	var lastPassDuration time.Duration
 	for {
 		r.cleanTemp(dev)
@@ -566,26 +567,22 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, once bool) {
 			default:
 			}
 			r.processPriorityJobs(dev.Id)
-			if len(r.partitions) > 0 {
-				found := false
-				for _, p := range r.partitions {
-					if filepath.Base(partition) == p {
-						found = true
-						break
-					}
-				}
-				if !found {
-					continue
-				}
+			if _, ok := r.partitions[filepath.Base(partition)]; len(r.partitions) > 0 && !ok {
+				continue
 			}
+
 			if partitioni, err := strconv.ParseUint(filepath.Base(partition), 10, 64); err == nil {
 				func() {
+					fmt.Println("bout to get tick")
 					<-r.partRateTicker.C
+					fmt.Println("got it")
 					r.concurrencySem <- struct{}{}
+					fmt.Println("got conc guy")
 					r.deviceProgressIncr <- DeviceProgress{
 						dev:            dev,
 						PartitionsDone: 1,
 					}
+					fmt.Println("And incr guy")
 					j := &job{objPath: objPath, partition: filepath.Base(partition), dev: dev}
 					nodes, handoff := r.Ring.GetJobNodes(partitioni, j.dev.Id)
 					defer func() {
@@ -600,17 +597,18 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, once bool) {
 				}()
 			}
 		}
+		fmt.Println("eeeee: ", partitionsProcessed, numPartitions)
 		if partitionsProcessed >= numPartitions {
+			fmt.Println("sending fullrep incr")
 			r.deviceProgressIncr <- DeviceProgress{
 				dev:                dev,
 				FullReplicateCount: 1,
 			}
+			fmt.Println("got back")
 			lastPassDuration = time.Since(passStartTime)
 		}
-		if once {
+		if r.once {
 			break
-		} else {
-			time.Sleep(RunForeverInterval)
 		}
 	}
 }
@@ -620,23 +618,29 @@ func (r *Replicator) statsReporter(c <-chan time.Time) {
 	for {
 		select {
 		case deviceProgress := <-r.deviceProgressPassInit:
-			if curDp, ok := r.deviceProgress[deviceProgress.dev.Device]; !ok {
-				r.LogError("Trying to initialize progress and not present: %s", deviceProgress.dev.Device)
-
-			} else {
-				curDp.StartDate = time.Now()
-				curDp.LastUpdate = time.Now()
-				curDp.PartitionsDone = 0
-				curDp.PartitionsTotal = deviceProgress.PartitionsTotal
-				curDp.FilesSent = 0
-				curDp.BytesSent = 0
-				curDp.PriorityRepsDone = 0
-				curDp.LastPassDuration = deviceProgress.LastPassDuration
-				if deviceProgress.LastPassDuration > 0 {
-					curDp.LastPassUpdate = time.Now()
+			curDp, ok := r.deviceProgress[deviceProgress.dev.Device]
+			if !ok {
+				curDp = &DeviceProgress{
+					dev:        deviceProgress.dev,
+					StartDate:  time.Now(),
+					LastUpdate: time.Now(),
 				}
+				r.deviceProgress[deviceProgress.dev.Device] = curDp
+			}
+
+			curDp.StartDate = time.Now()
+			curDp.LastUpdate = time.Now()
+			curDp.PartitionsDone = 0
+			curDp.PartitionsTotal = deviceProgress.PartitionsTotal
+			curDp.FilesSent = 0
+			curDp.BytesSent = 0
+			curDp.PriorityRepsDone = 0
+			curDp.LastPassDuration = deviceProgress.LastPassDuration
+			if deviceProgress.LastPassDuration > 0 {
+				curDp.LastPassUpdate = time.Now()
 			}
 		case deviceProgress := <-r.deviceProgressIncr:
+			fmt.Println("doing a stats incr")
 			if curDp, ok := r.deviceProgress[deviceProgress.dev.Device]; !ok {
 				r.LogError("Trying to increment progress and not present: %s", deviceProgress.dev.Device)
 			} else {
@@ -662,6 +666,11 @@ func (r *Replicator) statsReporter(c <-chan time.Time) {
 			var maxLastPassUpdate time.Time
 
 			for _, dp := range r.deviceProgress {
+				if time.Since(dp.LastUpdate) > ReplicateDeviceTimeout {
+					dp.CancelCount += 1
+					r.restartReplicateDevice(dp.dev)
+					continue
+				}
 				totalParts += dp.PartitionsTotal
 				doneParts += dp.PartitionsDone
 				bytesProcessed += dp.BytesSent
@@ -705,30 +714,8 @@ func (r *Replicator) statsReporter(c <-chan time.Time) {
 	}
 }
 
-func (r *Replicator) restartDevice(dp *DeviceProgress, canceler chan struct{}) {
-	r.deviceProgressIncr <- DeviceProgress{
-		dev:         dp.dev,
-		CancelCount: 1,
-	}
-	close(canceler)
-	r.devGroup.Add(1)
-	go r.replicateDevice(dp.dev, false)
-}
-
-// will monitor r.deviceProgress and restart replicateDevice goroutines if
-// they look like they are not running anymore
-func (r *Replicator) monitorReplication(dp *DeviceProgress, canceler chan struct{}) {
-	for {
-		time.Sleep(300 * time.Second)
-		if time.Since(dp.LastUpdate) > ReplicateDeviceTimeout {
-			r.restartDevice(dp, canceler)
-			break
-		}
-	}
-}
-
 // Run replication passes for each device on the whole server.
-func (r *Replicator) run(once bool) {
+func (r *Replicator) run() {
 	statsTicker := time.NewTicker(StatsReportInterval)
 	go r.statsReporter(statsTicker.C)
 
@@ -740,20 +727,9 @@ func (r *Replicator) run(once bool) {
 		return
 	}
 	for _, dev := range localDevices {
-		if len(r.devices) > 0 {
-			found := false
-			for _, d := range r.devices {
-				if dev.Device == d {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
+		if _, ok := r.devices[dev.Device]; ok || len(r.devices) == 0 {
+			r.restartReplicateDevice(dev)
 		}
-		r.devGroup.Add(1)
-		go r.replicateDevice(dev, once)
 	}
 	r.devGroup.Wait()
 }
@@ -879,13 +855,14 @@ func (r *Replicator) startWebServer() {
 
 // Run a single replication pass. (NOTE: we will prob get rid of this because of priorityRepl)
 func (r *Replicator) Run() {
-	r.run(true)
+	r.once = true
+	r.run()
 }
 
 // Run replication passes in a loop until forever.
 func (r *Replicator) RunForever() {
 	go r.startWebServer()
-	r.run(false)
+	r.run()
 }
 
 func NewReplicator(conf string, flags *flag.FlagSet) (hummingbird.Daemon, error) {
@@ -894,6 +871,10 @@ func NewReplicator(conf string, flags *flag.FlagSet) (hummingbird.Daemon, error)
 		deviceProgress:         make(map[string]*DeviceProgress),
 		deviceProgressPassInit: make(chan DeviceProgress),
 		deviceProgressIncr:     make(chan DeviceProgress),
+		devices:                make(map[string]bool),
+		partitions:             make(map[string]bool),
+		cancelers:              make(map[string]chan struct{}),
+		once:                   false,
 	}
 	hashPathPrefix, hashPathSuffix, err := hummingbird.GetHashPrefixAndSuffix()
 	if err != nil {
@@ -924,13 +905,17 @@ func NewReplicator(conf string, flags *flag.FlagSet) (hummingbird.Daemon, error)
 	devices_flag := flags.Lookup("devices")
 	if devices_flag != nil {
 		if devices := devices_flag.Value.(flag.Getter).Get().(string); len(devices) > 0 {
-			replicator.devices = strings.Split(devices, ",")
+			for _, devName := range strings.Split(devices, ",") {
+				replicator.devices[strings.TrimSpace(devName)] = true
+			}
 		}
 	}
 	partitions_flag := flags.Lookup("partitions")
 	if partitions_flag != nil {
 		if partitions := partitions_flag.Value.(flag.Getter).Get().(string); len(partitions) > 0 {
-			replicator.partitions = strings.Split(partitions, ",")
+			for _, part := range strings.Split(partitions, ",") {
+				replicator.partitions[strings.TrimSpace(part)] = true
+			}
 		}
 	}
 	if !replicator.quorumDelete {

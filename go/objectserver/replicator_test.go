@@ -575,10 +575,14 @@ func TestRestartDevice(t *testing.T) {
 		LastUpdate: time.Now(),
 	}
 
+	saved := &replicationLogSaver{}
 	replicator := makeReplicator()
+	replicator.logger = saved
+
 	replicator.driveRoot = ts.objServer.driveRoot
-	RunForeverInterval = 10 * time.Millisecond
+	myTicker := make(chan time.Time)
 	replicator.RunForever()
+	replicator.partRateTicker.C = myTicker
 	replicator.deviceProgress["sda"] = dp
 
 	c := make(chan time.Time)
@@ -588,11 +592,20 @@ func TestRestartDevice(t *testing.T) {
 		done <- true
 	}()
 
-	canceler := make(chan struct{})
-	go replicator.replicateDevice(ldev, false)
-	replicator.restartDevice(dp, canceler)
-	assert.Equal(t, uint64(1), dp.CancelCount)
+	//canceler := make(chan struct{})
+	//replicator.cancelers["sda"] = canceler
+	replicator.restartReplicateDevice(ldev)
+	fmt.Println("111")
+	myTicker <- time.Now()
+	fmt.Println("222")
+	//replicator.partRateTicker
+	//replicator.restartDevice(dp, canceler)
+	close(replicator.cancelers["sda"])
+	replicator.replicateDevice(ldev, replicator.cancelers["sda"])
+	fmt.Println("33333: ", saved.logged)
+	assert.Equal(t, "replicateDevice canceled for device: sda", saved.logged[0])
 	c <- time.Now()
 	close(c)
 	<-done
+	assert.Equal(t, uint64(1), dp.FullReplicateCount)
 }
