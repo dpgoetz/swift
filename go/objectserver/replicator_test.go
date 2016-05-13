@@ -568,6 +568,16 @@ func TestRestartDevice(t *testing.T) {
 	require.Nil(t, err)
 	require.Equal(t, 201, resp.StatusCode)
 
+	req, err = http.NewRequest("PUT", fmt.Sprintf("http://%s:%d/sda/1/a/c/o2", ts.host, ts.port),
+		bytes.NewBuffer([]byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ")))
+	assert.Nil(t, err)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Content-Length", "26")
+	req.Header.Set("X-Timestamp", hummingbird.GetTimestamp())
+	resp, err = http.DefaultClient.Do(req)
+	require.Nil(t, err)
+	require.Equal(t, 201, resp.StatusCode)
+
 	ldev := &hummingbird.Device{ReplicationIp: ts.host, ReplicationPort: ts.port, Device: "sda"}
 	dp := &DeviceProgress{
 		dev:        ldev,
@@ -576,36 +586,103 @@ func TestRestartDevice(t *testing.T) {
 	}
 
 	saved := &replicationLogSaver{}
-	replicator := makeReplicator()
-	replicator.logger = saved
+	repl := makeReplicator()
+	repl.logger = saved
 
-	replicator.driveRoot = ts.objServer.driveRoot
+	repl.driveRoot = ts.objServer.driveRoot
 	myTicker := make(chan time.Time)
-	replicator.RunForever()
-	replicator.partRateTicker.C = myTicker
-	replicator.deviceProgress["sda"] = dp
+	//replicator.RunForever()
+	repl.partRateTicker = time.NewTicker(repl.timePerPart)
+	repl.partRateTicker.C = myTicker
+	repl.concurrencySem = make(chan struct{}, 5)
+	repl.deviceProgress["sda"] = dp
 
-	c := make(chan time.Time)
-	done := make(chan bool)
-	go func() {
-		replicator.statsReporter(c)
-		done <- true
-	}()
-
-	//canceler := make(chan struct{})
-	//replicator.cancelers["sda"] = canceler
-	replicator.restartReplicateDevice(ldev)
+	repl.restartReplicateDevice(ldev)
 	fmt.Println("111")
+	fmt.Println("ticker1")
+	cancelChan := repl.cancelers["sda"]
+	delete(repl.cancelers, "sda")
+	close(cancelChan)
+	//start replication for loop
+	statsDp := <-repl.deviceProgressPassInit
+	assert.Equal(t, uint64(2), statsDp.PartitionsTotal)
+	// but got canceled
+	statsDp = <-repl.deviceProgressIncr
+	assert.Equal(t, uint64(1), statsDp.CancelCount)
+	// start up everything again
+	repl.restartReplicateDevice(ldev)
+	//start replication for loop again
+	<-repl.deviceProgressPassInit
+	// 1st partition process
 	myTicker <- time.Now()
-	fmt.Println("222")
-	//replicator.partRateTicker
-	//replicator.restartDevice(dp, canceler)
-	close(replicator.cancelers["sda"])
-	replicator.replicateDevice(ldev, replicator.cancelers["sda"])
-	fmt.Println("33333: ", saved.logged)
-	assert.Equal(t, "replicateDevice canceled for device: sda", saved.logged[0])
-	c <- time.Now()
-	close(c)
-	<-done
-	assert.Equal(t, uint64(1), dp.FullReplicateCount)
+	statsDp = <-repl.deviceProgressIncr
+	assert.Equal(t, uint64(1), statsDp.PartitionsDone)
+	fmt.Println("a22222")
+
+	// syncing file to 2 places
+	statsDp = <-repl.deviceProgressIncr
+	statsDp = <-repl.deviceProgressIncr
+	assert.Equal(t, uint64(1), statsDp.FilesSent)
+
+	// 2nd partition process
+	fmt.Println("a2vvv1111")
+	myTicker <- time.Now()
+	fmt.Println("a2vvvpopoop")
+	statsDp = <-repl.deviceProgressIncr
+	assert.Equal(t, uint64(1), statsDp.PartitionsDone)
+	fmt.Println("a2vvv2222")
+	statsDp = <-repl.deviceProgressIncr
+	statsDp = <-repl.deviceProgressIncr
+	assert.Equal(t, uint64(1), statsDp.FilesSent)
+	fmt.Println("a33333")
+	cancelChan = repl.cancelers["sda"]
+	delete(repl.cancelers, "sda")
+	close(cancelChan)
+	fmt.Println("zzz1")
+	statsDp = <-repl.deviceProgressIncr
+	fmt.Println("zzz2")
+	assert.Equal(t, uint64(1), statsDp.FullReplicateCount)
+	statsDp = <-repl.deviceProgressPassInit
+	fmt.Println("zzz3")
+	assert.Equal(t, uint64(2), statsDp.PartitionsTotal)
+	statsDp = <-repl.deviceProgressIncr
+	fmt.Println("zzz4")
+	assert.Equal(t, uint64(1), statsDp.CancelCount)
+
+	/*
+		myTicker <- time.Now() // 1st parti/tion of 1st run allowed to run
+		////////////////////////////////
+		delete(repl.cancelers, "sda")
+		close(cancelChan)
+		fmt.Println("a44444")
+		statsDp = <-repl.deviceProgressIncr
+		assert.Equal(t, uint64(1), statsDp.FilesSent)
+		statsDp = <-repl.deviceProgressIncr
+		assert.Equal(t, uint64(1), statsDp.FullReplicateCount)
+
+		fmt.Println("ticker2")
+		myTicker <- time.Now() // 1st partition of 2nd run to run
+		fmt.Println("ticker3")
+		myTicker <- time.Now() // 2nd partition of 2nd run to run
+		myTicker <- time.Now() // make sure you get all the way through to next run
+		close(repl.cancelers["sda"])
+		fmt.Println("last tick")
+		//myTicker <- time.Now() // 2nd partition of 2nd run to run
+		fmt.Println("checking fullreplcount")
+		repl.deviceProgressIncr <- DeviceProgress{
+			dev: ldev,
+		}
+		/*
+			c <- time.Now()
+			close(c)
+			<-done
+	*/
+	/*
+		assert.Equal(t, uint64(3), dp.PartitionsDone)
+		fmt.Println("checking fullreplcount again")
+		//time.Sleep(2)
+		assert.Equal(t, uint64(1), dp.FullReplicateCount)
+		fmt.Println("lalalala: ", saved.logged)
+		assert.Equal(t, uint64(1), dp.FullReplicateCount)
+	*/
 }
