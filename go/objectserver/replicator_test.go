@@ -160,9 +160,6 @@ func TestReplicatorReportStatsNotSetup(t *testing.T) {
 			replicator.statsReporter(c)
 			done <- true
 		}()
-		replicator.deviceProgressPassInit <- DeviceProgress{
-			dev:             &hummingbird.Device{Device: "sda"},
-			PartitionsTotal: 12}
 		replicator.deviceProgressIncr <- DeviceProgress{
 			dev:             &hummingbird.Device{Device: "sda"},
 			PartitionsTotal: 12}
@@ -173,8 +170,7 @@ func TestReplicatorReportStatsNotSetup(t *testing.T) {
 		return saved.logged[len(saved.logged)-1]
 	}
 	reportStats(time.Now().Add(100 * time.Second))
-	assert.Equal(t, "Trying to initialize progress and not present: sda", saved.logged[0])
-	assert.Equal(t, "Trying to increment progress and not present: sda", saved.logged[1])
+	assert.Equal(t, "Trying to increment progress and not present: sda", saved.logged[0])
 }
 
 func TestReplicatorReportStats(t *testing.T) {
@@ -589,18 +585,17 @@ func TestRestartDevice(t *testing.T) {
 	repl := makeReplicator()
 	repl.logger = saved
 
+	// set stuff up
 	repl.driveRoot = ts.objServer.driveRoot
 	myTicker := make(chan time.Time)
-	//replicator.RunForever()
 	repl.partRateTicker = time.NewTicker(repl.timePerPart)
 	repl.partRateTicker.C = myTicker
 	repl.concurrencySem = make(chan struct{}, 5)
 	repl.deviceProgress["sda"] = dp
 
 	repl.restartReplicateDevice(ldev)
-	fmt.Println("111")
-	fmt.Println("ticker1")
 	cancelChan := repl.cancelers["sda"]
+	// precancel the run
 	delete(repl.cancelers, "sda")
 	close(cancelChan)
 	//start replication for loop
@@ -617,7 +612,6 @@ func TestRestartDevice(t *testing.T) {
 	myTicker <- time.Now()
 	statsDp = <-repl.deviceProgressIncr
 	assert.Equal(t, uint64(1), statsDp.PartitionsDone)
-	fmt.Println("a22222")
 
 	// syncing file to 2 places
 	statsDp = <-repl.deviceProgressIncr
@@ -625,64 +619,23 @@ func TestRestartDevice(t *testing.T) {
 	assert.Equal(t, uint64(1), statsDp.FilesSent)
 
 	// 2nd partition process
-	fmt.Println("a2vvv1111")
 	myTicker <- time.Now()
-	fmt.Println("a2vvvpopoop")
 	statsDp = <-repl.deviceProgressIncr
 	assert.Equal(t, uint64(1), statsDp.PartitionsDone)
-	fmt.Println("a2vvv2222")
 	statsDp = <-repl.deviceProgressIncr
 	statsDp = <-repl.deviceProgressIncr
 	assert.Equal(t, uint64(1), statsDp.FilesSent)
-	fmt.Println("a33333")
+	// 2nd partition was processed so cancel next run
 	cancelChan = repl.cancelers["sda"]
 	delete(repl.cancelers, "sda")
 	close(cancelChan)
-	fmt.Println("zzz1")
+	// check that full replicate was tracked
 	statsDp = <-repl.deviceProgressIncr
-	fmt.Println("zzz2")
 	assert.Equal(t, uint64(1), statsDp.FullReplicateCount)
+	// starting final run
 	statsDp = <-repl.deviceProgressPassInit
-	fmt.Println("zzz3")
 	assert.Equal(t, uint64(2), statsDp.PartitionsTotal)
+	// but it got canceled so returning
 	statsDp = <-repl.deviceProgressIncr
-	fmt.Println("zzz4")
 	assert.Equal(t, uint64(1), statsDp.CancelCount)
-
-	/*
-		myTicker <- time.Now() // 1st parti/tion of 1st run allowed to run
-		////////////////////////////////
-		delete(repl.cancelers, "sda")
-		close(cancelChan)
-		fmt.Println("a44444")
-		statsDp = <-repl.deviceProgressIncr
-		assert.Equal(t, uint64(1), statsDp.FilesSent)
-		statsDp = <-repl.deviceProgressIncr
-		assert.Equal(t, uint64(1), statsDp.FullReplicateCount)
-
-		fmt.Println("ticker2")
-		myTicker <- time.Now() // 1st partition of 2nd run to run
-		fmt.Println("ticker3")
-		myTicker <- time.Now() // 2nd partition of 2nd run to run
-		myTicker <- time.Now() // make sure you get all the way through to next run
-		close(repl.cancelers["sda"])
-		fmt.Println("last tick")
-		//myTicker <- time.Now() // 2nd partition of 2nd run to run
-		fmt.Println("checking fullreplcount")
-		repl.deviceProgressIncr <- DeviceProgress{
-			dev: ldev,
-		}
-		/*
-			c <- time.Now()
-			close(c)
-			<-done
-	*/
-	/*
-		assert.Equal(t, uint64(3), dp.PartitionsDone)
-		fmt.Println("checking fullreplcount again")
-		//time.Sleep(2)
-		assert.Equal(t, uint64(1), dp.FullReplicateCount)
-		fmt.Println("lalalala: ", saved.logged)
-		assert.Equal(t, uint64(1), dp.FullReplicateCount)
-	*/
 }

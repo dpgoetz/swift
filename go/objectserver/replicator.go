@@ -321,7 +321,6 @@ func (r *Replicator) syncFile(objFile string, dst []*syncFileArg, j *job) (syncs
 	}
 
 	// get file upload results
-	fmt.Println("sending files wrs: ", wrs)
 	for _, sfa := range wrs {
 		if sfa == nil {
 			continue
@@ -332,13 +331,11 @@ func (r *Replicator) syncFile(objFile string, dst []*syncFileArg, j *job) (syncs
 			if fur.Success {
 				syncs++
 				insync++
-				fmt.Println("sending files sent thing: ", objFile)
 				r.deviceProgressIncr <- DeviceProgress{
 					dev:       j.dev,
 					FilesSent: 1,
 					BytesSent: uint64(fileSize),
 				}
-				fmt.Println("sending files sent thing returns")
 			}
 		}
 	}
@@ -527,7 +524,6 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 	for {
 		r.cleanTemp(dev)
 		passStartTime := time.Now()
-		fmt.Println("uuu1")
 
 		if mounted, err := hummingbird.IsMount(filepath.Join(r.driveRoot, dev.Device)); r.checkMounts && (err != nil || mounted != true) {
 			r.LogError("[replicateDevice] Drive not mounted: %s", dev.Device)
@@ -549,7 +545,6 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 			partitionList[j], partitionList[i] = partitionList[i], partitionList[j]
 		}
 
-		fmt.Println("uuu2")
 		numPartitions := uint64(len(partitionList))
 		partitionsProcessed := uint64(0)
 
@@ -559,7 +554,6 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 			LastPassDuration: lastPassDuration,
 		}
 
-		fmt.Println("the part list: ", partitionList)
 		for _, partition := range partitionList {
 			if hummingbird.Exists(filepath.Join(r.driveRoot, dev.Device, "lock_device")) {
 				break
@@ -567,12 +561,10 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 			select {
 			case <-canceler:
 				{
-					fmt.Println("got cancel")
 					r.deviceProgressIncr <- DeviceProgress{
 						dev:         dev,
 						CancelCount: 1,
 					}
-					fmt.Println("sent cancelcount thing")
 					r.LogError("replicateDevice canceled for device: %s", dev.Device)
 					return
 				}
@@ -585,16 +577,12 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 
 			if partitioni, err := strconv.ParseUint(filepath.Base(partition), 10, 64); err == nil {
 				func() {
-					fmt.Println("bout to get tick: ", partition)
 					<-r.partRateTicker.C
-					fmt.Println("got it: ", partition)
 					r.concurrencySem <- struct{}{}
-					fmt.Println("got conc guy: ", partition)
 					r.deviceProgressIncr <- DeviceProgress{
 						dev:            dev,
 						PartitionsDone: 1,
 					}
-					fmt.Println("And incr guy: ", partition)
 					j := &job{objPath: objPath, partition: filepath.Base(partition), dev: dev}
 					nodes, handoff := r.Ring.GetJobNodes(partitioni, j.dev.Id)
 					defer func() {
@@ -609,14 +597,11 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 				}()
 			}
 		}
-		fmt.Println("eeeeeeeeeeeeeee: ", partitionsProcessed, numPartitions)
 		if partitionsProcessed >= numPartitions {
-			fmt.Println("sending fullrep incr")
 			r.deviceProgressIncr <- DeviceProgress{
 				dev:                dev,
 				FullReplicateCount: 1,
 			}
-			fmt.Println("got back")
 			lastPassDuration = time.Since(passStartTime)
 		}
 		if r.once {
@@ -652,9 +637,7 @@ func (r *Replicator) statsReporter(c <-chan time.Time) {
 				curDp.LastPassUpdate = time.Now()
 			}
 		case deviceProgress := <-r.deviceProgressIncr:
-			fmt.Println("doing a stats incr: pd,frc,fs ", deviceProgress.PartitionsDone, deviceProgress.FullReplicateCount, deviceProgress.FilesSent)
 			if curDp, ok := r.deviceProgress[deviceProgress.dev.Device]; !ok {
-				fmt.Println("1234321")
 				r.LogError("Trying to increment progress and not present: %s", deviceProgress.dev.Device)
 			} else {
 				curDp.LastUpdate = time.Now()
@@ -664,7 +647,6 @@ func (r *Replicator) statsReporter(c <-chan time.Time) {
 				curDp.PriorityRepsDone += deviceProgress.PriorityRepsDone
 				curDp.FullReplicateCount += deviceProgress.FullReplicateCount
 				curDp.CancelCount += deviceProgress.CancelCount
-				fmt.Println("55555: ", curDp.PartitionsDone)
 			}
 		case _, ok := <-c:
 			if !ok {
