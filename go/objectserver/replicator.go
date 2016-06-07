@@ -558,22 +558,17 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 		}
 
 		for _, partition := range partitionList {
+			tStart := time.Now()
+			var priorityDur, partRateDur, concSemDur, replDur time.Duration
+			var handoff bool
+			var nodes []Device
 			if hummingbird.Exists(filepath.Join(r.driveRoot, dev.Device, "lock_device")) {
 				break
 			}
-			select {
-			case <-canceler:
-				{
-					r.deviceProgressIncr <- deviceProgress{
-						dev:         dev,
-						CancelCount: 1,
-					}
-					r.LogError("replicateDevice canceled for device: %s", dev.Device)
-					return
-				}
-			default:
-			}
 			r.processPriorityJobs(dev.Id)
+			priorityDur = time.Since(tStart)
+			tStart = time.Now()
+
 			if _, ok := r.partitions[filepath.Base(partition)]; len(r.partitions) > 0 && !ok {
 				continue
 			}
@@ -581,13 +576,17 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 			if partitioni, err := strconv.ParseUint(filepath.Base(partition), 10, 64); err == nil {
 				func() {
 					<-r.partRateTicker.C
+					partRateDur = time.Since(tStart)
+					tStart = time.Now()
 					r.concurrencySem <- struct{}{}
+					concSemDur = time.Since(tStart)
+					tStart = time.Now()
 					r.deviceProgressIncr <- deviceProgress{
 						dev:            dev,
 						PartitionsDone: 1,
 					}
 					j := &job{objPath: objPath, partition: filepath.Base(partition), dev: dev}
-					nodes, handoff := r.Ring.GetJobNodes(partitioni, j.dev.Id)
+					nodes, handoff = r.Ring.GetJobNodes(partitioni, j.dev.Id)
 					defer func() {
 						<-r.concurrencySem
 					}()
@@ -597,7 +596,28 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 					} else {
 						r.replicateLocal(j, nodes, r.Ring.GetMoreNodes(partitioni))
 					}
+					replDur = time.Since(tStart)
 				}()
+			}
+			select {
+			case <-canceler:
+				{
+					r.deviceProgressIncr <- deviceProgress{
+						dev:         dev,
+						CancelCount: 1,
+					}
+					toDevs := make([]string)
+					for d := range nodes {
+						toDevs = append(toDevs,
+							fmt.Sprintf("%s:%d/%s", d.Ip, d.Port.d.Device))
+					}
+					r.LogError("replicateDevice canceled for device: %s/%s ( %d %d %d %d %s %s)",
+						dev.Device, partition, priorityDur.Seconds(),
+						partRateDur.Seconds(), concSemDur.Seconds(),
+						replDur.Seconds(), handoff, strings.Join(toDevs, " "))
+					return
+				}
+			default:
 			}
 		}
 		if partitionsProcessed >= numPartitions {
