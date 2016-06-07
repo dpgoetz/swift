@@ -562,7 +562,7 @@ func TestPriorityRepHandler404(t *testing.T) {
 	require.EqualValues(t, 404, w.Code)
 }
 
-func TestRestartDevice(t *testing.T) {
+func lalaTestRestartDevice(t *testing.T) {
 	ts, err := makeObjectServer()
 	assert.Nil(t, err)
 	defer ts.Close()

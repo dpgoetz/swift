@@ -561,7 +561,7 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 			tStart := time.Now()
 			var priorityDur, partRateDur, concSemDur, replDur time.Duration
 			var handoff bool
-			var nodes []Device
+			var nodes []*hummingbird.Device
 			if hummingbird.Exists(filepath.Join(r.driveRoot, dev.Device, "lock_device")) {
 				break
 			}
@@ -606,12 +606,12 @@ func (r *Replicator) replicateDevice(dev *hummingbird.Device, canceler chan stru
 						dev:         dev,
 						CancelCount: 1,
 					}
-					toDevs := make([]string)
-					for d := range nodes {
+					toDevs := make([]string, len(nodes))
+					for _, d := range nodes {
 						toDevs = append(toDevs,
-							fmt.Sprintf("%s:%d/%s", d.Ip, d.Port.d.Device))
+							fmt.Sprintf("%s:%d/%s", d.Ip, d.Port, d.Device))
 					}
-					r.LogError("replicateDevice canceled for device: %s/%s ( %d %d %d %d %s %s)",
+					r.LogError("replicateDevice canceled for device: %s/%s ( %d %d %d %d %v %s)",
 						dev.Device, partition, priorityDur.Seconds(),
 						partRateDur.Seconds(), concSemDur.Seconds(),
 						replDur.Seconds(), handoff, strings.Join(toDevs, " "))
