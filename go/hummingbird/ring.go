@@ -42,6 +42,7 @@ type Ring interface {
 	LocalDevices(localPort int) (devs []*Device, err error)
 	AllDevices() (devs []Device)
 	GetMoreNodes(partition uint64) MoreNodes
+	GetDevice(id int) *Device
 }
 
 type MoreNodes interface {
@@ -190,6 +191,14 @@ func (r *hashRing) AllDevices() (devs []Device) {
 
 func (r *hashRing) GetMoreNodes(partition uint64) MoreNodes {
 	return &hashMoreNodes{r: r, partition: partition, used: nil}
+}
+
+func (r *hashRing) GetDevice(id int) *Device {
+	d := r.getData()
+	if id > len(d.Devs) {
+		return nil
+	}
+	return &d.Devs[id]
 }
 
 func (r *hashRing) reload() error {

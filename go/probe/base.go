@@ -88,6 +88,10 @@ func (r *FakeRing) GetMoreNodes(partition uint64) hummingbird.MoreNodes {
 	return &fakeMoreNodes{r.devices[3]}
 }
 
+func (r *FakeRing) GetDevice(id int) *hummingbird.Device {
+	return nil
+}
+
 // Environment encapsulates a temporary SAIO-style environment for the object server, replicator, and auditor
 // and provides a few utility functions for manipulating it.
 type Environment struct {

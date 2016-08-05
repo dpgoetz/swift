@@ -33,6 +33,8 @@ import (
 
 type priFakeRing struct {
 	mapping map[uint64][]int
+	weights map[uint64]float64
+	numDevs int
 }
 
 func (p *priFakeRing) GetJobNodes(partition uint64, localDevice int) (response []*hummingbird.Device, handoff bool) {
@@ -54,23 +56,32 @@ func (p *priFakeRing) LocalDevices(localPort int) (devs []*hummingbird.Device, e
 }
 
 func (p *priFakeRing) AllDevices() (devs []hummingbird.Device) {
-	devs = append(devs, hummingbird.Device{Id: 0, Device: "drive0", Ip: "127.0.0.0", Port: 1})
-	devs = append(devs, hummingbird.Device{Id: 1, Device: "drive1", Ip: "127.0.0.1", Port: 1})
-	devs = append(devs, hummingbird.Device{Id: 2, Device: "drive2", Ip: "127.0.0.1", Port: 1})
+	for i := 0; i < p.numDevs; i++ {
+		devs = append(devs, hummingbird.Device{Id: i, Device: fmt.Sprintf("drive%d", i), Ip: "127.0.0.1", Port: 1, Weight: p.weights[uint64(i)] + 1})
+	}
 	return devs
 }
 
 func (p *priFakeRing) GetMoreNodes(partition uint64) hummingbird.MoreNodes { return nil }
 
 func (p *priFakeRing) GetNodes(partition uint64) (response []*hummingbird.Device) {
-	for _, p := range p.mapping[partition] {
-		response = append(response, &hummingbird.Device{Id: p, Device: fmt.Sprintf("drive%d", p), Ip: "127.0.0.1", Port: p})
+	for _, pa := range p.mapping[partition] {
+
+		response = append(response, &hummingbird.Device{Id: pa, Device: fmt.Sprintf("drive%d", pa), Ip: "127.0.0.1", Port: pa, Weight: p.weights[uint64(pa)] + 1})
 	}
 	return
 }
 
 func (p *priFakeRing) GetNodesInOrder(partition uint64) (response []*hummingbird.Device) {
 	return p.GetNodes(partition)
+}
+
+func (r *priFakeRing) GetDevice(id int) *hummingbird.Device {
+	allDevs := r.AllDevices()
+	if id < len(allDevs) {
+		return &allDevs[id]
+	}
+	return nil
 }
 
 func TestGetPartMoveJobs(t *testing.T) {
@@ -80,12 +91,14 @@ func TestGetPartMoveJobs(t *testing.T) {
 			0: {1, 2, 3, 4, 5},
 			1: {6, 7, 8, 9, 10},
 		},
+		numDevs: 12,
 	}
 	newRing := &priFakeRing{
 		mapping: map[uint64][]int{
 			0: {6, 2, 3, 4, 5},
 			1: {6, 7, 8, 9, 11},
 		},
+		numDevs: 12,
 	}
 	jobs := getPartMoveJobs(oldRing, newRing)
 	require.EqualValues(t, 2, len(jobs))
@@ -95,6 +108,50 @@ func TestGetPartMoveJobs(t *testing.T) {
 	require.EqualValues(t, 1, jobs[1].Partition)
 	require.EqualValues(t, 10, jobs[1].FromDevice.Id)
 	require.EqualValues(t, 11, jobs[1].ToDevices[0].Id)
+}
+
+func TestGetPartMoveJobsDriveFailure(t *testing.T) {
+	t.Parallel()
+	oldRing := &priFakeRing{
+		mapping: map[uint64][]int{
+			0: {1, 2, 3, 4, 5},
+			1: {6, 7, 8, 9, 10},
+		},
+		numDevs: 12,
+	}
+	newRing := &priFakeRing{
+		mapping: map[uint64][]int{
+			0: {6, 2, 3, 4, 5},
+			1: {6, 7, 8, 9, 10},
+		},
+		numDevs: 12,
+	}
+	jobs := getPartMoveJobs(oldRing, newRing)
+	require.EqualValues(t, 1, len(jobs))
+	require.EqualValues(t, 0, jobs[0].Partition)
+	require.EqualValues(t, 1, jobs[0].FromDevice.Id)
+	require.EqualValues(t, 6, jobs[0].ToDevices[0].Id)
+
+	oldRing = &priFakeRing{
+		mapping: map[uint64][]int{
+			0: {1, 2, 3, 4, 5},
+			1: {6, 7, 8, 9, 10},
+		},
+		numDevs: 12,
+	}
+	newRing = &priFakeRing{
+		mapping: map[uint64][]int{
+			0: {6, 2, 3, 4, 5},
+			1: {6, 7, 8, 9, 10},
+		},
+		weights: map[uint64]float64{1: -1},
+		numDevs: 12,
+	}
+	jobs = getPartMoveJobs(oldRing, newRing)
+	require.EqualValues(t, 1, len(jobs))
+	require.EqualValues(t, 0, jobs[0].Partition)
+	require.EqualValues(t, 2, jobs[0].FromDevice.Id)
+	require.EqualValues(t, 6, jobs[0].ToDevices[0].Id)
 }
 
 func TestGetRestoreDeviceJobs(t *testing.T) {
@@ -183,6 +240,7 @@ func TestGetRescuePartsJobs(t *testing.T) {
 			0: {1, 2, 3},
 			1: {6, 7, 8},
 		},
+		numDevs: 3,
 	}
 	jobs := getRescuePartsJobs(objRing, []uint64{1})
 	require.EqualValues(t, 3, len(jobs))

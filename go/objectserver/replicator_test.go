@@ -86,6 +86,9 @@ func (r *FakeRing) AllDevices() (devs []hummingbird.Device) {
 func (r *FakeRing) GetMoreNodes(partition uint64) hummingbird.MoreNodes {
 	return nil
 }
+func (r *FakeRing) GetDevice(id int) *hummingbird.Device {
+	return nil
+}
 
 func makeReplicator(settings ...string) (*Replicator, error) {
 	return makeReplicatorWithFlags(settings, &flag.FlagSet{})

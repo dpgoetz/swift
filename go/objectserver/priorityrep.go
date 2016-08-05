@@ -132,11 +132,30 @@ func getPartMoveJobs(oldRing, newRing hummingbird.Ring) []*PriorityRepJob {
 		for i := range olddevs {
 			if olddevs[i].Id != newdevs[i].Id {
 				// TODO: handle if a node just changes positions, which doesn't happen, but isn't against the contract.
-				jobs = append(jobs, &PriorityRepJob{
-					Partition:  partition,
-					FromDevice: olddevs[i],
-					ToDevices:  []*hummingbird.Device{newdevs[i]},
-				})
+				oldDevInNewRing := newRing.GetDevice(olddevs[i].Id)
+				if oldDevInNewRing != nil && oldDevInNewRing.Weight > 0 {
+					// device still active in new ring
+					// partition is moving because of new capacity.
+					jobs = append(jobs, &PriorityRepJob{
+						Partition:  partition,
+						FromDevice: olddevs[i],
+						ToDevices:  []*hummingbird.Device{newdevs[i]},
+					})
+				} else {
+					// partition is moving because of device failure,
+					// find another device to populate partition
+					for j := range olddevs {
+						oldDevInNewRing = newRing.GetDevice(olddevs[j].Id)
+						if oldDevInNewRing != nil && oldDevInNewRing.Weight > 0 {
+							jobs = append(jobs, &PriorityRepJob{
+								Partition:  partition,
+								FromDevice: olddevs[j],
+								ToDevices:  []*hummingbird.Device{newdevs[i]},
+							})
+							break
+						}
+					}
+				}
 			}
 		}
 	}
