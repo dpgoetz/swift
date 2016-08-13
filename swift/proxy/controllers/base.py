@@ -1379,9 +1379,18 @@ class Controller(object):
         :returns: a swob.Response object, or None if no responses were received
         """
         self.app.logger.thread_locals = logger_thread_locals
+
+        def assign_affinity_header(node, out_headers):
+            if self.app.write_affinity_is_local_fn is None:
+                return
+            cont_region = out_headers.get("X-Container-Region")
+            if cont_region and int(node['region']) != int(cont_region):
+                out_headers["X-Container-Update-No-Wait"] = "yes"
+
         for node in nodes:
             try:
                 start_node_timing = time.time()
+                assign_affinity_header(node, headers)
                 with ConnectionTimeout(self.app.conn_timeout):
                     conn = http_connect(node['ip'], node['port'],
                                         node['device'], part, method, path,

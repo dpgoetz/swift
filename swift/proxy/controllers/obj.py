@@ -283,6 +283,7 @@ class BaseObjectController(Controller):
 
         def set_container_update(index, container):
             headers[index]['X-Container-Partition'] = container_partition
+            headers[index]['X-Container-Region'] = container['region']
             headers[index]['X-Container-Host'] = csv_append(
                 headers[index].get('X-Container-Host'),
                 '%(ip)s:%(port)s' % container)
@@ -877,9 +878,18 @@ class ReplicatedObjectController(BaseObjectController):
         object to handle the rest of the streaming.
         """
         self.app.logger.thread_locals = logger_thread_locals
+
+        def assign_affinity_header(node, out_headers):
+            if self.app.write_affinity_is_local_fn is None:
+                return
+            cont_region = out_headers.get("X-Container-Region")
+            if cont_region and int(node['region']) != int(cont_region):
+                out_headers["X-Container-Update-No-Wait"] = "yes"
+
         for node in nodes:
             try:
                 start_time = time.time()
+                assign_affinity_header(node, headers)
                 with ConnectionTimeout(self.app.conn_timeout):
                     conn = http_connect(
                         node['ip'], node['port'], node['device'], part, 'PUT',
