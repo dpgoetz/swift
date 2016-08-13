@@ -186,8 +186,12 @@ func (server *ObjectServer) containerUpdates(request *http.Request, metadata map
 		server.updateContainer(metadata, request, vars, logger)
 		firstDone <- struct{}{}
 	}()
+	waitTime := server.updateTimeout
+	if hummingbird.LooksTrue(request.Header.Get("X-Container-Update-No-Wait")) {
+		waitTime = 0
+	}
 	select {
 	case <-firstDone:
-	case <-time.After(server.updateTimeout):
+	case <-time.After(waitTime):
 	}
 }
