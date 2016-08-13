@@ -2673,8 +2673,18 @@ class TestObjectController(unittest.TestCase):
     def test_PUT_respects_write_affinity_with_507s(self):
         written_to = []
 
+        cont_no_waits = []
         def test_connect(ipaddr, port, device, partition, method, path,
                          headers=None, query_string=None):
+            if 'X-Container-Host' in headers:
+                cport = int(headers['X-Container-Host'].split(":")[-1])
+                obj_region = port % 2
+                cont_region = cport % 2
+
+                ok = (obj_region != cont_region) == (
+                    headers.get('X-Container-Update-No-Wait') == "yes")
+                cont_no_waits.append(ok)
+
             if path == '/a/c/o.jpg':
                 written_to.append((ipaddr, port, device))
 
@@ -2709,6 +2719,7 @@ class TestObjectController(unittest.TestCase):
         self.assertEqual(0, written_to[0][1] % 2)   # it's (ip, port, device)
         self.assertEqual(0, written_to[1][1] % 2)
         self.assertNotEqual(0, written_to[2][1] % 2)
+        self.assertEqual(cont_no_waits, [True, True, True])
 
     @unpatch_policies
     def test_PUT_no_etag_fallocate(self):

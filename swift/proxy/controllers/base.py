@@ -1526,6 +1526,7 @@ class Controller(object):
         for node in nodes:
             try:
                 start_node_timing = time.time()
+                self._set_container_affinity_header(node, headers)
                 with ConnectionTimeout(self.app.conn_timeout):
                     conn = http_connect(node['ip'], node['port'],
                                         node['device'], part, method, path,
@@ -1555,6 +1556,13 @@ class Controller(object):
                     node, self.server_type,
                     _('Trying to %(method)s %(path)s') %
                     {'method': method, 'path': path})
+
+    def _set_container_affinity_header(self, node, out_headers):
+        if self.app.write_affinity_is_local_fn is None:
+            return
+        cont_region = out_headers.get("X-Container-Region")
+        if cont_region and int(node['region']) != int(cont_region):
+            out_headers["X-Container-Update-No-Wait"] = "yes"
 
     def make_requests(self, req, ring, part, method, path, headers,
                       query_string='', overrides=None):

@@ -311,8 +311,11 @@ class ObjectController(BaseStorageServer):
         # after getting a successful response to the object create. The
         # `container_update_timeout` bounds the length of time we wait so that
         # one slow container server doesn't make the entire request lag.
+        update_timeout = self.container_update_timeout
+        if config_true_value(headers_in.get("X-Container-Update-No-Wait")):
+            update_timeout = 0
         try:
-            with Timeout(self.container_update_timeout):
+            with Timeout(update_timeout):
                 for gt in update_greenthreads:
                     gt.wait()
         except Timeout:

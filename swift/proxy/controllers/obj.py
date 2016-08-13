@@ -256,6 +256,7 @@ class BaseObjectController(Controller):
 
         def set_container_update(index, container):
             headers[index]['X-Container-Partition'] = container_partition
+            headers[index]['X-Container-Region'] = container.get('region')
             headers[index]['X-Container-Host'] = csv_append(
                 headers[index].get('X-Container-Host'),
                 '%(ip)s:%(port)s' % container)
@@ -518,6 +519,7 @@ class BaseObjectController(Controller):
         """
         self.app.logger.thread_locals = logger_thread_locals
         for node in nodes:
+            self._set_container_affinity_header(node, headers)
             try:
                 putter = self._make_putter(node, part, req, headers)
                 self.app.set_node_timing(node, putter.connect_duration)
